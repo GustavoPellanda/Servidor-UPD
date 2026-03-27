@@ -1,4 +1,5 @@
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -24,7 +25,6 @@ public class Server {
 
     // Processa um comando GET recebido:
     private void handleGet(String message, DatagramPacket request) throws IOException {
-
         // Extrai o nome do arquivo solicitado da mensagem GET:
         String filename = Protocol.extractFilename(message);
 
@@ -60,6 +60,38 @@ public class Server {
         );
 
         socket.send(packet); // Envia o pacote de resposta ao cliente
+        System.out.println("[Servidor] Enviado START para " + request.getAddress().getHostAddress() + ":" + request.getPort());
+        sendFileChunks(file, request); // Inicia o envio dos chunks do arquivo para o cliente
+    }
+
+    // Envia os chunks do arquivo para o cliente:
+    private void sendFileChunks(File file, DatagramPacket request) throws IOException {
+
+        FileInputStream fis = new FileInputStream(file);
+
+        byte[] buffer = new byte[Protocol.CHUNK_SIZE];
+        int bytesRead;
+        int seq = 0;
+
+        // Lê o arquivo em blocos do tamanho definido por Protocol.CHUNK_SIZE e envia cada bloco como um datagrama separado:
+        while ((bytesRead = fis.read(buffer)) != -1) {
+
+            String chunk = new String(buffer, 0, bytesRead);
+            String message = "DATA|" + seq + "|" + chunk;
+            byte[] data = message.getBytes();
+
+            DatagramPacket packet = new DatagramPacket(
+                data,
+                data.length,
+                request.getAddress(),
+                request.getPort()
+            );
+            socket.send(packet);
+
+            System.out.println("[Servidor] Enviado segmento " + seq);
+            seq++;
+        }
+        fis.close();
     }
 
     // Envia uma mensagem de erro para o cliente, indicando que o arquivo solicitado não foi encontrado:

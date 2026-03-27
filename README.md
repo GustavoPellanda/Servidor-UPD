@@ -3,11 +3,13 @@
 1. Comunicação básica UDP ✓
 2. Definir protocolo ✓
 3. Implementar GET ✓
-4. Implementar envio de arquivo sem confiabilidade
-5. Implementar checksum
-6. Implementar controle de sequência
-7. Implementar retransmissão
-8. Implementar simulação de perda
+4. Criar protocolo simples textual ✓
+5. Transformar o protocolo para usar packets binários
+6. Implementar envio de arquivo sem confiabilidade *(em andamento)*
+7. Implementar checksum
+8. Implementar controle de sequência
+9. Implementar retransmissão
+10. Implementar simulação de perda
 
 ---
 
@@ -15,79 +17,107 @@
 
 ### Inicialização dos endpoints
 
-O servidor cria um socket associado à porta `9876`, fazendo com que o sistema operacional direcione para ele todos os datagramas destinados a essa porta. O cliente cria um socket com uma porta efêmera atribuída automaticamente e resolve o endereço do servidor (`localhost`). Nesse ponto, ambos estão prontos para trocar dados, mas não existe qualquer conexão estabelecida entre eles.
+O servidor cria um socket associado à porta `9876`, fazendo com que o sistema operacional direcione para ele todos os datagramas destinados a essa porta. O cliente cria um socket com uma porta efêmera atribuída automaticamente e resolve o endereço do servidor (`localhost`). Nesse ponto, ambos estão prontos para trocar dados, sem estabelecimento de conexão, conforme o modelo UDP.
+
+---
 
 ### Envio da requisição pelo cliente
 
-O cliente constrói uma requisição seguindo o protocolo definido, no formato:
+O cliente constrói uma requisição no formato:
 
 ```
 GET|nome_do_arquivo
 ```
 
-Essa string é convertida em bytes e encapsulada em um `DatagramPacket`, contendo o IP e a porta do servidor. Ao chamar `send()`, o datagrama é entregue ao sistema operacional, que o transmite pela rede **sem garantias de entrega, ordem ou confiabilidade**.
+Essa mensagem é serializada em bytes e encapsulada em um `DatagramPacket`, contendo o endereço IP e a porta do servidor. O envio é realizado através de `socket.send()`, sem garantias de entrega, ordem ou duplicação.
+
+---
 
 ### Recepção no servidor
 
-O servidor permanece bloqueado em `receive()` até a chegada de um datagrama. Quando isso ocorre, o sistema operacional entrega o pacote ao socket correto com base na porta.
+O servidor permanece bloqueado em `receive()` até a chegada de um datagrama. Ao receber:
 
-O servidor então:
+* Extrai o conteúdo da mensagem
+* Identifica o comando (`GET`)
+* Obtém o endereço e a porta do cliente
 
-* Extrai a mensagem recebida
-* Identifica o tipo de comando (ex: `GET`)
-* Obtém o endereço e porta do cliente a partir do pacote
+---
 
 ### Processamento da requisição (GET)
 
-Ao receber uma mensagem `GET`, o servidor:
+Ao receber um `GET`, o servidor:
 
-1. Extrai o nome do arquivo solicitado
-2. Verifica se o arquivo existe no sistema de arquivos
-3. Executa uma das ações:
+1. Extrai o nome do arquivo
+2. Verifica sua existência no sistema de arquivos
+3. Calcula os parâmetros da transferência:
 
-* **Se o arquivo existir:**
+   * Tamanho total do arquivo (`fileSize`)
+   * Número de segmentos (`numSegments`)
+   * Tamanho de cada segmento (`chunkSize`)
 
-  ```
-  OK|nome_do_arquivo
-  ```
+---
 
-* **Se o arquivo não existir:**
+### Envio da resposta START (negociação)
 
-  ```
-  ERROR|Arquivo nao encontrado
-  ```
+Se o arquivo existir, o servidor responde com:
 
-Essa resposta é construída conforme o protocolo e enviada ao cliente.
+```
+START|fileSize|numSegments|chunkSize
+```
 
-### Envio da resposta
+Essa mensagem representa uma **fase de negociação**, onde o cliente passa a conhecer:
 
-O servidor encapsula a resposta em um novo `DatagramPacket`, utilizando o IP e a porta de origem do cliente, e realiza o envio via `socket.send()`.
+* Quantidade de dados esperados
+* Estrutura da transmissão
+* Granularidade dos segmentos
 
-Assim como no envio do cliente, essa transmissão ocorre **sem garantias de entrega ou confirmação**.
+Caso o arquivo não exista:
 
-### Recepção no cliente
+```
+ERROR|Arquivo nao encontrado
+```
 
-O cliente aguarda a resposta utilizando `receive()` com timeout configurado.
+---
 
-* Se a resposta chegar dentro do tempo limite:
+### Início da transmissão de dados (stream UDP)
 
-  * A mensagem é extraída
-  * O resultado é exibido ao usuário
+Após enviar o `START`, o servidor inicia o envio sequencial dos dados do arquivo.
 
-* Caso contrário:
+O arquivo é lido em blocos de tamanho fixo (`CHUNK_SIZE`) e cada bloco é enviado como um datagrama independente no formato:
 
-  * Ocorre timeout
-  * O cliente informa possível perda de pacote
+```
+DATA|seq|conteudo
+```
 
-### Natureza da comunicação
+Onde:
 
-A comunicação continua sendo **não orientada à conexão**, porém agora possui uma **camada de protocolo de aplicação**, responsável por:
+* `seq` representa o número sequencial do segmento
+* `conteudo` representa os bytes lidos do arquivo (atualmente tratados como texto)
 
-* Definir comandos (`GET`)
-* Padronizar respostas (`OK`, `ERROR`)
-* Dar significado semântico às mensagens
+Essa etapa caracteriza um **stream de dados sobre UDP**, ainda sem garantias de confiabilidade.
 
-Cada troca ainda é independente, mas agora segue regras explícitas definidas pelo protocolo.
+---
+
+### Recepção contínua no cliente
+
+Ao receber a mensagem `START`, o cliente entra em modo de recepção contínua:
+
+* Executa um loop de recepção baseado em `numSegments`
+* Recebe múltiplos datagramas sequenciais
+* Exibe os segmentos recebidos
+
+Exemplo:
+
+```
+[Cliente] Segmento recebido: DATA|0|...
+[Cliente] Segmento recebido: DATA|1|...
+```
+
+Neste estágio:
+
+* Não há reordenação
+* Não há detecção de perda
+* Não há validação de integridade
 
 ---
 
@@ -106,10 +136,17 @@ main()
            ├── Protocol.isGet()
            ├── handleGet()
            │    ├── Protocol.extractFilename()
-           │    ├── verificação do arquivo (File.exists)
-           │    ├── buildOkResponse() ou ERROR
-           │    └── socket.send()
+           │    ├── File.exists()
+           │    ├── cálculo de fileSize, numSegments, chunkSize
+           │    ├── buildStartResponse()
+           │    ├── socket.send() (START)
+           │    └── sendFileChunks()
+           │         ├── FileInputStream.read()
+           │         ├── montagem "DATA|seq|payload"
+           │         └── socket.send()
 ```
+
+---
 
 ## Cliente
 
@@ -120,9 +157,18 @@ main()
       ├── Protocol.buildGetRequest()
       ├── sendMessage()
       │    └── socket.send()
-      ├── receiveAndDisplayResponse()
+      ├── handleServerResponse()
       │    ├── receivePacket()
       │    │    └── socket.receive()
-      │    └── extractMessage()
+      │    ├── extractMessage()
+      │    ├── Protocol.isStart()
+      │    └── handleStart()
+      │         ├── parseMessage()
+      │         └── receiveFile()
+      │              ├── loop (numSegments)
+      │              ├── receivePacket()
+      │              └── extractMessage()
       └── loop
 ```
+
+---

@@ -94,6 +94,27 @@ public class Client {
         System.out.println(" - Tamanho do arquivo: " + fileSize + " bytes");
         System.out.println(" - Número de segmentos: " + numSegments);
         System.out.println(" - Tamanho do chunk: " + chunkSize);
+
+        receiveFile(numSegments);
+    }
+
+    // Recebe os segmentos do arquivo enviados pelo servidor:
+    private void receiveFile(int numSegments) {
+        System.out.println("[Cliente] Recebendo segmentos...");
+
+        for (int i = 0; i < numSegments; i++) {
+            try {
+                DatagramPacket packet = receivePacket();
+                String msg = extractMessage(packet);
+
+                System.out.println("[Cliente] Segmento recebido: " + msg);
+
+            } catch (IOException e) {
+                System.out.println("[Cliente] Erro ao receber segmento.");
+            }
+        }
+
+        System.out.println("[Cliente] Recepção finalizada.");
     }
 
     // Lê uma linha digitada pelo usuário no console:
