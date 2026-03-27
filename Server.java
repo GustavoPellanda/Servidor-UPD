@@ -1,8 +1,11 @@
+import java.io.File;
 import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
+
+import Protocol.Protocol;
 
 public class Server {
 
@@ -16,6 +19,60 @@ public class Server {
         this.running = false;                    // Inicialmente, o servidor não está rodando até que start() seja chamado
     }
 
+    // ---- Métodos relacionados ao protocolo de comunicação ----
+
+    // Processa um comando GET recebido:
+    private void handleGet(String message, DatagramPacket request) throws IOException {
+
+        // Extrai o nome do arquivo solicitado da mensagem GET:
+        String filename = Protocol.extractFilename(message);
+
+        if (filename.isEmpty()) {
+            return;
+        }
+
+        File file = new File(filename);
+
+        if (!file.exists()) {
+            sendError(request.getAddress(), request.getPort());
+            return;
+        }
+
+        System.out.println("[Servidor] GET recebido para arquivo: " + filename);
+
+        String response = Protocol.buildOkResponse(filename); // Chama o método do protocolo para construir a resposta OK, incluindo o nome do arquivo
+
+        byte[] data = response.getBytes(); // Converte a string de resposta em bytes para envio
+
+        // Cria um pacote de resposta, associando os bytes da resposta ao endereço e porta do cliente (extraídos do pacote de requisição):
+        DatagramPacket responsePacket = new DatagramPacket(
+            data,
+            data.length,
+            request.getAddress(),
+            request.getPort()
+        );
+
+        socket.send(responsePacket); // Envia o pacote de resposta ao cliente
+        System.out.println("[Servidor] Resposta OK enviada para " + request.getAddress().getHostAddress() + ":" + request.getPort());
+    }
+
+    // Envia uma mensagem de erro para o cliente, indicando que o arquivo solicitado não foi encontrado:
+    private void sendError(InetAddress addr, int port) throws IOException {
+        byte[] data = Protocol.ERROR_FILE_NOT_FOUND.getBytes();
+        
+        DatagramPacket packet = new DatagramPacket(
+            data,
+            data.length,
+            addr,
+            port
+        );
+
+        socket.send(packet);
+        System.out.println("[Servidor] Erro: Arquivo não encontrado para " + addr.getHostAddress() + ":" + port);
+    }
+
+    // ---- Métodos para o funcionamento básico do servidor ----
+
     // Recebe um datagrama do cliente:
     private DatagramPacket receivePacket() throws IOException {
         byte[] buffer = new byte[BUFFER_SIZE]; // Buffer para armazenar os dados recebidos
@@ -27,28 +84,6 @@ public class Server {
     // Extrai a mensagem do pacote recebido:
     private String extractMessage(DatagramPacket packet) {
         return new String(packet.getData(), 0, packet.getLength());
-    }
-
-    // Constrói o texto da resposta com base na mensagem original recebida:
-    private String buildResponseText(String originalMessage) {
-        return "Mensagem recebida do cliente: \"" + originalMessage + "\"";
-    }
-
-    // Envia uma resposta de volta ao cliente:
-    private void sendResponse(String originalMessage, InetAddress clientAddress, int clientPort) throws IOException {
-        String responseText  = buildResponseText(originalMessage);
-        byte[] responseBytes = responseText.getBytes();
-
-        // Cria um pacote de resposta, associando os bytes da resposta ao endereço e porta do cliente:
-        DatagramPacket response = new DatagramPacket(
-            responseBytes,
-            responseBytes.length,
-            clientAddress,
-            clientPort
-        );
-
-        socket.send(response);
-        System.out.println("[Servidor] Resposta enviada -> \"" + responseText + "\"");
     }
 
     // Loga detalhes do pacote recebido, incluindo o endereço IP, porta e conteúdo da mensagem:
@@ -67,10 +102,16 @@ public class Server {
 
         while (running) {
             try {
-                DatagramPacket request = receivePacket();                       // Bloqueia a thread até receber um pacote
-                String message = extractMessage(request);                       // Extrai a mensagem do pacote recebido
-                logReceived(message, request);                                  // Loga detalhes do pacote recebido
-                sendResponse(message, request.getAddress(), request.getPort()); // Envia resposta de volta ao cliente
+                DatagramPacket request = receivePacket(); // Bloqueia a thread até receber um pacote
+                String message = extractMessage(request); // Extrai a mensagem do pacote recebido
+                logReceived(message, request); // Loga detalhes do pacote recebido
+                // Interpretação de comandos do protocolo:
+                if (Protocol.isGet(message)) {
+                    handleGet(message, request);
+                } else {
+                    System.out.println("[Servidor] Comando desconhecido.");
+                }
+
             } catch (IOException e) {
                 if (running) {
                     System.err.println("[Servidor] Erro ao processar pacote: " + e.getMessage());

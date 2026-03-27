@@ -4,6 +4,8 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.util.Scanner;
+
+import Protocol.Protocol;
  
 public class Client {
  
@@ -92,7 +94,8 @@ public class Client {
             if (shouldExit(message)) break;
  
             try {
-                sendMessage(message);
+                String request = Protocol.buildGetRequest(message);
+                sendMessage(request);
                 receiveAndDisplayResponse();
             } catch (IOException e) {
                 System.err.println("[Cliente] Erro de I/O: " + e.getMessage());
