@@ -4,13 +4,14 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
+import java.nio.charset.StandardCharsets;
 
 import Protocol.Protocol;
 
 public class Server {
 
     private static final int PORT = 9876;        // Porta onde o servidor escuta por mensagens dos clientes
-    private static final int BUFFER_SIZE = 1024; // Tamanho do buffer para receber mensagens (em bytes)
+    private static final int BUFFER_SIZE = 2048; // Tamanho do buffer para receber mensagens (em bytes)
     private final DatagramSocket socket;         // Socket UDP usado para enviar e receber datagramas
     private boolean running;                     // Flag para controlar o loop principal do servidor
 
@@ -38,22 +39,27 @@ public class Server {
             return;
         }
 
+        long fileSize = file.length(); // Obtém o tamanho do arquivo em bytes
+        int chunkSize = Protocol.CHUNK_SIZE; // Tamanho do chunk definido no protocolo (1KB)
+        // Divide o tamanho do arquivo pelo tamanho do chunk para calcular o número total de segmentos necessários para transferir o arquivo completo:
+        int numSegments = (int) Math.ceil((double) fileSize / chunkSize); 
+        
         System.out.println("[Servidor] GET recebido para arquivo: " + filename);
+        System.out.println("[Servidor] Tamanho: " + fileSize + " bytes | Segmentos: " + numSegments);
 
-        String response = Protocol.buildOkResponse(filename); // Chama o método do protocolo para construir a resposta OK, incluindo o nome do arquivo
+        String response = Protocol.buildStartResponse(fileSize, numSegments, chunkSize);
 
-        byte[] data = response.getBytes(); // Converte a string de resposta em bytes para envio
+        byte[] data = response.getBytes(StandardCharsets.UTF_8);
 
         // Cria um pacote de resposta, associando os bytes da resposta ao endereço e porta do cliente (extraídos do pacote de requisição):
-        DatagramPacket responsePacket = new DatagramPacket(
+        DatagramPacket packet  = new DatagramPacket(
             data,
             data.length,
             request.getAddress(),
             request.getPort()
         );
 
-        socket.send(responsePacket); // Envia o pacote de resposta ao cliente
-        System.out.println("[Servidor] Resposta OK enviada para " + request.getAddress().getHostAddress() + ":" + request.getPort());
+        socket.send(packet); // Envia o pacote de resposta ao cliente
     }
 
     // Envia uma mensagem de erro para o cliente, indicando que o arquivo solicitado não foi encontrado:

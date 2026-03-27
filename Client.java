@@ -48,21 +48,52 @@ public class Client {
         socket.receive(packet); // Lança SocketTimeoutException se TIMEOUT_MS expirar sem resposta
         return packet;
     }
- 
+    
+    // Processa a resposta do servidor, verificando se é um comando START ou uma mensagem de erro:
+    private void handleServerResponse() throws IOException {
+        try {
+            DatagramPacket responsePacket = receivePacket();
+            String response = extractMessage(responsePacket);
+
+            System.out.println("[Cliente] Resposta recebida: \"" + response + "\"");
+
+            if (Protocol.isStart(response)) { // Utiliza o método isStart do protocolo para verificar se a resposta é um comando START válido
+                handleStart(response);
+            } else if (response.startsWith("ERROR")) {
+                System.out.println("[Cliente] Erro do servidor: " + response);
+            } else {
+                System.out.println("[Cliente] Resposta desconhecida.");
+            }
+
+        } catch (SocketTimeoutException e) {
+            System.out.printf("[Cliente] Sem resposta após %dms.%n", TIMEOUT_MS);
+        }
+    }
+
     // Extrai a mensagem do pacote recebido:
     private String extractMessage(DatagramPacket packet) {
         return new String(packet.getData(), 0, packet.getLength()); // Usa getLength() para não incluir bytes de padding do buffer
     }
- 
-    // Aguarda a resposta do servidor e a exibe no console:
-    private void receiveAndDisplayResponse() throws IOException {
-        try {
-            DatagramPacket responsePacket = receivePacket();
-            String response = extractMessage(responsePacket);
-            System.out.println("[Cliente] Resposta do servidor: \"" + response + "\"");
-        } catch (SocketTimeoutException e) {
-            System.out.printf("[Cliente] Sem resposta após %dms. Pacote pode ter sido perdido.%n", TIMEOUT_MS);
+
+    // Processa a resposta START do servidor:
+    private void handleStart(String response) {
+        String[] parts = Protocol.parseMessage(response);
+
+        // Verifica se a resposta START tem o formato esperado (START|fileSize|numSegments|chunkSize):
+        if (parts.length != 4) {
+            System.out.println("[Cliente] START inválido.");
+            return;
         }
+
+        // Extrai os parâmetros do comando START:
+        long fileSize = Long.parseLong(parts[1]);
+        int numSegments = Integer.parseInt(parts[2]);
+        int chunkSize = Integer.parseInt(parts[3]);
+
+        System.out.println("[Cliente] Transferência iniciada:");
+        System.out.println(" - Tamanho do arquivo: " + fileSize + " bytes");
+        System.out.println(" - Número de segmentos: " + numSegments);
+        System.out.println(" - Tamanho do chunk: " + chunkSize);
     }
 
     // Lê uma linha digitada pelo usuário no console:
@@ -86,7 +117,7 @@ public class Client {
     // Loop principal do cliente:
     public void start() {
         System.out.println("[Cliente] Conectado a " + SERVER_HOST + ":" + SERVER_PORT);
-        System.out.println("[Cliente] Digite uma mensagem (ou '" + EXIT_COMMAND + "' para encerrar):");
+        System.out.println("[Cliente] Digite o nome do arquivo que deseja buscar no servidor (ou '" + EXIT_COMMAND + "' para encerrar):");
  
         while (true) {
             String message = readUserInput();
@@ -96,7 +127,7 @@ public class Client {
             try {
                 String request = Protocol.buildGetRequest(message);
                 sendMessage(request);
-                receiveAndDisplayResponse();
+                handleServerResponse();
             } catch (IOException e) {
                 System.err.println("[Cliente] Erro de I/O: " + e.getMessage());
             }
