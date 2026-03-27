@@ -1,3 +1,14 @@
+# Etapas do projeto previstas:
+
+1. Comunicação básica UDP ✓
+2. Definir protocolo
+3. Implementar GET
+4. Implementar envio de arquivo sem confiabilidade
+5. Implementar checksum
+6. Implementar controle de sequência
+7. Implementar retransmissão
+8. Implementar simulação de perda
+
 # Inicialização dos endpoints
 
 O servidor cria um socket associado à porta `9876`, fazendo com que o sistema operacional direcione para ele todos os datagramas destinados a essa porta. O cliente cria um socket com uma porta efêmera atribuída automaticamente e resolve o endereço do servidor (`localhost`). Nesse ponto, ambos estão prontos para trocar dados, mas não existe qualquer conexão estabelecida entre eles.
