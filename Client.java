@@ -3,8 +3,12 @@ import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
+import java.util.Arrays;
+import java.util.Map;
 import java.util.Scanner;
+import java.util.TreeMap;
 
+import Protocol.Packet;
 import Protocol.Protocol;
  
 public class Client {
@@ -79,42 +83,51 @@ public class Client {
     private void handleStart(String response) {
         String[] parts = Protocol.parseMessage(response);
 
-        // Verifica se a resposta START tem o formato esperado (START|fileSize|numSegments|chunkSize):
-        if (parts.length != 4) {
-            System.out.println("[Cliente] START inválido.");
-            return;
-        }
-
-        // Extrai os parâmetros do comando START:
         long fileSize = Long.parseLong(parts[1]);
         int numSegments = Integer.parseInt(parts[2]);
-        int chunkSize = Integer.parseInt(parts[3]);
 
-        System.out.println("[Cliente] Transferência iniciada:");
-        System.out.println(" - Tamanho do arquivo: " + fileSize + " bytes");
-        System.out.println(" - Número de segmentos: " + numSegments);
-        System.out.println(" - Tamanho do chunk: " + chunkSize);
+        System.out.println("[Cliente] Iniciando recepção...");
 
         receiveFile(numSegments);
     }
 
     // Recebe os segmentos do arquivo enviados pelo servidor:
-    private void receiveFile(int numSegments) {
-        System.out.println("[Cliente] Recebendo segmentos...");
+    private void receiveFile(int expectedSegments) {
 
-        for (int i = 0; i < numSegments; i++) {
+        Map<Integer, byte[]> received = new TreeMap<>();
+
+        while (true) {
             try {
-                DatagramPacket packet = receivePacket();
-                String msg = extractMessage(packet);
+                DatagramPacket udpPacket = receivePacket();
 
-                System.out.println("[Cliente] Segmento recebido: " + msg);
+                byte[] raw = Arrays.copyOf(
+                    udpPacket.getData(),
+                    udpPacket.getLength()
+                );
 
-            } catch (IOException e) {
-                System.out.println("[Cliente] Erro ao receber segmento.");
+                Packet packet = Packet.deserialize(raw);
+
+                if (packet.isData()) {
+
+                    received.put(
+                        packet.getSequenceNumber(),
+                        packet.getPayload()
+                    );
+
+                    System.out.println("[Cliente] DATA seq=" + packet.getSequenceNumber());
+
+                } else if (packet.isEnd()) {
+
+                    System.out.println("[Cliente] END recebido");
+                    break;
+                }
+
+            } catch (Exception e) {
+                System.out.println("[Cliente] Erro: " + e.getMessage());
             }
         }
 
-        System.out.println("[Cliente] Recepção finalizada.");
+        System.out.println("[Cliente] Recebidos: " + received.size() + "/" + expectedSegments);
     }
 
     // Lê uma linha digitada pelo usuário no console:

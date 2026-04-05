@@ -6,8 +6,10 @@ import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 import Protocol.Protocol;
+import Protocol.Packet;
 
 public class Server {
 
@@ -61,36 +63,53 @@ public class Server {
 
         socket.send(packet); // Envia o pacote de resposta ao cliente
         System.out.println("[Servidor] Enviado START para " + request.getAddress().getHostAddress() + ":" + request.getPort());
-        sendFileChunks(file, request); // Inicia o envio dos chunks do arquivo para o cliente
+        sendFile(file, request.getAddress(), request.getPort());
     }
 
-    // Envia os chunks do arquivo para o cliente:
-    private void sendFileChunks(File file, DatagramPacket request) throws IOException {
-
+    // Envia o conteúdo do arquivo para o cliente, dividindo-o em chunks e enviando cada chunk como um pacote separado:
+    private void sendFile(File file, InetAddress addr, int port) throws IOException {
         FileInputStream fis = new FileInputStream(file);
 
         byte[] buffer = new byte[Protocol.CHUNK_SIZE];
         int bytesRead;
         int seq = 0;
 
-        // Lê o arquivo em blocos do tamanho definido por Protocol.CHUNK_SIZE e envia cada bloco como um datagrama separado:
         while ((bytesRead = fis.read(buffer)) != -1) {
 
-            String chunk = new String(buffer, 0, bytesRead);
-            String message = "DATA|" + seq + "|" + chunk;
-            byte[] data = message.getBytes();
+            byte[] chunk = Arrays.copyOf(buffer, bytesRead);
 
-            DatagramPacket packet = new DatagramPacket(
+            Packet packet = new Packet(seq, Protocol.FLAG_DATA, chunk);
+
+            byte[] data = packet.serialize();
+
+            DatagramPacket udpPacket = new DatagramPacket(
                 data,
                 data.length,
-                request.getAddress(),
-                request.getPort()
+                addr,
+                port
             );
-            socket.send(packet);
 
-            System.out.println("[Servidor] Enviado segmento " + seq);
+            socket.send(udpPacket);
+
+            System.out.println("[Servidor] DATA seq=" + seq);
+
             seq++;
         }
+
+        // Pacote de término
+        Packet endPacket = new Packet(seq, Protocol.FLAG_END);
+
+        DatagramPacket endUdp = new DatagramPacket(
+            endPacket.serialize(),
+            Protocol.HEADER_SIZE,
+            addr,
+            port
+        );
+
+        socket.send(endUdp);
+
+        System.out.println("[Servidor] END enviado");
+
         fis.close();
     }
 

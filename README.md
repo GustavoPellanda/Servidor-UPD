@@ -5,7 +5,7 @@
 3. Implementar GET ✓
 4. Criar protocolo simples textual ✓
 5. Transformar o protocolo para usar packets binários
-6. Implementar envio de arquivo sem confiabilidade *(em andamento)*
+6. Implementar envio de arquivo sem confiabilidade
 7. Implementar checksum
 8. Implementar controle de sequência
 9. Implementar retransmissão
