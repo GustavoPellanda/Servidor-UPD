@@ -14,9 +14,9 @@ import Protocol.Packet;
 public class Server {
 
     private static final int PORT = 9876;        // Porta onde o servidor escuta por mensagens dos clientes
-    private static final int BUFFER_SIZE = 2048; // Tamanho do buffer para receber mensagens (em bytes)
     private final DatagramSocket socket;         // Socket UDP usado para enviar e receber datagramas
     private boolean running;                     // Flag para controlar o loop principal do servidor
+    private static final int BUFFER_SIZE = Protocol.HEADER_SIZE + Protocol.MAX_PAYLOAD; // Tamanho do buffer para receber mensagens (em bytes)
 
     public Server() throws SocketException {     // Pode lançar SocketException se a porta já estiver em uso ou houver problema de rede
         this.socket  = new DatagramSocket(PORT); // Cria um socket UDP vinculado à porta especificada
@@ -107,7 +107,7 @@ public class Server {
         byte[] endData = endPacket.serialize();
         DatagramPacket endUdp = new DatagramPacket(
             endData,
-            Protocol.HEADER_SIZE,
+            endData.length,
             addr,
             port
         );

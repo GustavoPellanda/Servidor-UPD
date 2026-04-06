@@ -92,19 +92,18 @@ public class Client {
                 Packet packet = Packet.deserialize(raw);
 
                 if (packet.isData()) {
-                if (shouldDrop(packet.getSequenceNumber())) {
-                    // Segmento descartado — não insere no mapa
-                    continue;
-                } else {
-                    // Armazena o payload do pacote no mapa, usando o número de sequência como chave para garantir a ordem correta:
-                    received.put(packet.getSequenceNumber(), packet.getPayload()); 
-                    System.out.println("[Cliente] DATA seq=" + packet.getSequenceNumber());
-                }
+                    if (shouldDrop(packet.getSequenceNumber())) {
+                        // Segmento descartado — não insere no mapa
+                        continue;
+                    } else {
+                        // Armazena o payload do pacote no mapa, usando o número de sequência como chave para garantir a ordem correta:
+                        received.put(packet.getSequenceNumber(), packet.getPayload()); 
+                        System.out.println("[Cliente] DATA seq=" + packet.getSequenceNumber());
+                    }
                 } else if (packet.isEnd()) {
                     System.out.println("[Cliente] END recebido");
                     break;
                 }
-
             } catch (Exception e) {
                 System.out.println("[Cliente] Erro: " + e.getMessage());
             }
