@@ -89,12 +89,15 @@ public class Packet {
 
     // Getters para os campos do pacote:
     public int getSequenceNumber() { return sequenceNumber; }
-    public byte getFlags() { return flags; }
-    public short getDataLength() { return dataLength; }
-    public byte[] getPayload() { return payload.clone(); }
+    public byte getFlags()         { return flags; }
+    public short getDataLength()   { return dataLength; }
+    public byte[] getPayload()     { return payload.clone(); }
     // Métodos auxiliares para verificar o tipo do pacote com base nas flags:
-    public boolean isData() { return flags == Protocol.FLAG_DATA; }
-    public boolean isEnd()  { return flags == Protocol.FLAG_END; }
+    public boolean isGet()   { return flags == Protocol.FLAG_GET; }
+    public boolean isStart() { return flags == Protocol.FLAG_START; }
+    public boolean isData()  { return flags == Protocol.FLAG_DATA; }
+    public boolean isEnd()   { return flags == Protocol.FLAG_END; }
+    public boolean isError() { return flags == Protocol.FLAG_ERROR; }
 
     @Override
     public String toString() {

@@ -26,10 +26,7 @@ public class Server {
     // ---- Métodos relacionados ao protocolo de comunicação ----
 
     // Processa um comando GET recebido:
-    private void handleGet(String message, DatagramPacket request) throws IOException {
-        // Extrai o nome do arquivo solicitado da mensagem GET:
-        String filename = Protocol.extractFilename(message);
-
+    private void handleGet(String filename, InetAddress addr, int port) throws IOException {
         if (filename.isEmpty()) {
             return;
         }
@@ -37,33 +34,40 @@ public class Server {
         File file = new File(filename);
 
         if (!file.exists()) {
-            sendError(request.getAddress(), request.getPort());
+            sendError("Arquivo não encontrado: " + filename, addr, port);
             return;
         }
 
         long fileSize = file.length(); // Obtém o tamanho do arquivo em bytes
-        int chunkSize = Protocol.CHUNK_SIZE; // Tamanho do chunk definido no protocolo (1KB)
+        int chunkSize = Protocol.CHUNK_SIZE; // Tamanho do chunk definido no protocolo
         // Divide o tamanho do arquivo pelo tamanho do chunk para calcular o número total de segmentos necessários para transferir o arquivo completo:
         int numSegments = (int) Math.ceil((double) fileSize / chunkSize); 
         
         System.out.println("[Servidor] GET recebido para arquivo: " + filename);
         System.out.println("[Servidor] Tamanho: " + fileSize + " bytes | Segmentos: " + numSegments);
 
-        String response = Protocol.buildStartResponse(fileSize, numSegments, chunkSize);
-
-        byte[] data = response.getBytes(StandardCharsets.UTF_8);
-
-        // Cria um pacote de resposta, associando os bytes da resposta ao endereço e porta do cliente (extraídos do pacote de requisição):
-        DatagramPacket packet  = new DatagramPacket(
-            data,
-            data.length,
-            request.getAddress(),
-            request.getPort()
-        );
-
-        socket.send(packet); // Envia o pacote de resposta ao cliente
-        System.out.println("[Servidor] Enviado START para " + request.getAddress().getHostAddress() + ":" + request.getPort());
-        sendFile(file, request.getAddress(), request.getPort());
+        String meta = fileSize + "|" + numSegments; // Formato do payload do START: "tamanho|numSegmentos"
+        byte[] metaBytes = meta.getBytes(StandardCharsets.UTF_8); // Converte a string de metadados para bytes usando UTF-8
+        
+        // Cria um pacote START com sequência 0, flag de START e o payload de metadados do arquivo:
+        Packet startPacket = new Packet(
+            0, 
+            Protocol.FLAG_START, 
+            metaBytes
+        ); 
+        byte[] data = startPacket.serialize();
+        
+        // Cria um DatagramPacket com os dados do START, o endereço do cliente e a porta do cliente para envio:
+        DatagramPacket udpPacket = new DatagramPacket(
+            data, 
+            data.length, 
+            addr, 
+            port
+        ); 
+        socket.send(udpPacket);
+        
+        System.out.println("[Servidor] Enviado START para " + addr.getHostAddress() + ":" + port);
+        sendFile(file, addr, port);    
     }
 
     // Envia o conteúdo do arquivo para o cliente, dividindo-o em chunks e enviando cada chunk como um pacote separado:
@@ -74,58 +78,61 @@ public class Server {
         int bytesRead;
         int seq = 0;
 
+        // Loop de leitura do arquivo em chunks, criando um pacote para cada chunk e enviando para o cliente:
         while ((bytesRead = fis.read(buffer)) != -1) {
-
             byte[] chunk = Arrays.copyOf(buffer, bytesRead);
-
-            Packet packet = new Packet(seq, Protocol.FLAG_DATA, chunk);
-
+            // Cria um pacote de dados com o número de sequência atual, flag de DATA e o payload do chunk lido do arquivo:
+            Packet packet = new Packet(
+                seq, 
+                Protocol.FLAG_DATA, 
+                chunk
+            );
             byte[] data = packet.serialize();
 
+            // Cria um DatagramPacket com os dados do chunk, o endereço do cliente e a porta do cliente para envio:
             DatagramPacket udpPacket = new DatagramPacket(
                 data,
                 data.length,
                 addr,
                 port
             );
-
             socket.send(udpPacket);
 
             System.out.println("[Servidor] DATA seq=" + seq);
-
             seq++;
         }
 
-        // Pacote de término
-        Packet endPacket = new Packet(seq, Protocol.FLAG_END);
-
+        // Pacote de término com a sequência final e flag de END, sem payload:
+        Packet endPacket = new Packet(seq, Protocol.FLAG_END);  
+        byte[] endData = endPacket.serialize();
         DatagramPacket endUdp = new DatagramPacket(
-            endPacket.serialize(),
+            endData,
             Protocol.HEADER_SIZE,
             addr,
             port
         );
-
         socket.send(endUdp);
 
         System.out.println("[Servidor] END enviado");
-
         fis.close();
     }
 
     // Envia uma mensagem de erro para o cliente, indicando que o arquivo solicitado não foi encontrado:
-    private void sendError(InetAddress addr, int port) throws IOException {
-        byte[] data = Protocol.ERROR_FILE_NOT_FOUND.getBytes();
-        
-        DatagramPacket packet = new DatagramPacket(
-            data,
-            data.length,
-            addr,
+    private void sendError(String message, InetAddress addr, int port) throws IOException {
+        byte[] msgBytes = message.getBytes(StandardCharsets.UTF_8);
+        Packet errorPacket = new Packet(
+            0, 
+            Protocol.FLAG_ERROR, 
+            msgBytes
+        );
+        byte[] data = errorPacket.serialize();
+        DatagramPacket udpPacket = new DatagramPacket(
+            data, 
+            data.length, 
+            addr, 
             port
         );
-
-        socket.send(packet);
-        System.out.println("[Servidor] Erro: Arquivo não encontrado para " + addr.getHostAddress() + ":" + port);
+        socket.send(udpPacket);
     }
 
     // ---- Métodos para o funcionamento básico do servidor ----
@@ -138,20 +145,6 @@ public class Server {
         return packet;
     }
 
-    // Extrai a mensagem do pacote recebido:
-    private String extractMessage(DatagramPacket packet) {
-        return new String(packet.getData(), 0, packet.getLength());
-    }
-
-    // Loga detalhes do pacote recebido, incluindo o endereço IP, porta e conteúdo da mensagem:
-    private void logReceived(String message, DatagramPacket packet) {
-        System.out.printf("[Servidor] Pacote recebido de %s:%d -> \"%s\"%n",
-            packet.getAddress().getHostAddress(),
-            packet.getPort(),
-            message
-        );
-    }
-
     // Inicialização e loop principal do servidor:
     public void start() {
         running = true;
@@ -159,12 +152,14 @@ public class Server {
 
         while (running) {
             try {
-                DatagramPacket request = receivePacket(); // Bloqueia a thread até receber um pacote
-                String message = extractMessage(request); // Extrai a mensagem do pacote recebido
-                logReceived(message, request); // Loga detalhes do pacote recebido
+                DatagramPacket request = receivePacket(); // Aguarda um pacote de requisição do cliente (bloqueante)
+                byte[] raw = Arrays.copyOf(request.getData(), request.getLength()); // Copia apenas os bytes relevantes do buffer, evitando incluir bytes de padding
+                Packet packet = Packet.deserialize(raw); // Interpreta os bytes recebidos como um objeto Packet, validando o checksum e extraindo os campos (seq, flags, payload)
+
                 // Interpretação de comandos do protocolo:
-                if (Protocol.isGet(message)) {
-                    handleGet(message, request);
+                if (packet.isGet()) {
+                    String filename = new String(packet.getPayload(), StandardCharsets.UTF_8); // Converte o payload do pacote GET de volta para uma string
+                    handleGet(filename, request.getAddress(), request.getPort());
                 } else {
                     System.out.println("[Servidor] Comando desconhecido.");
                 }
