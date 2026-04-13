@@ -6,8 +6,10 @@ import java.net.InetAddress;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Scanner;
+import java.util.Set;
 import java.util.TreeMap;
 
 import Protocol.Packet;
@@ -35,6 +37,8 @@ public class Client {
         this.scanner = new Scanner(System.in);  // Scanner para ler a entrada do usuário a partir do console
     }
 
+    // ---- Métodos genéricos para envio e recepção de pacotes ----
+
     // Envia um pacote serializado para o servidor:
     private void sendPacket(Packet packet) throws IOException {
         byte[] data = packet.serialize(); // Utiliza o método serialize() do Packet para converter o objeto em um array de bytes
@@ -55,7 +59,9 @@ public class Client {
         socket.receive(packet); // Lança SocketTimeoutException se TIMEOUT_MS expirar sem resposta
         return packet;
     }
-    
+
+    // ---- Métodos relacionados ao protocolo de comunicação ----
+
     // Processa a resposta do servidor após enviar a requisição GET, verificando se é um pacote START (com metadados do arquivo) ou um pacote de erro:
     private void handleServerResponse(String filename) throws IOException {
         try {
@@ -79,57 +85,88 @@ public class Client {
         }
     }
 
-    // Recebe os pacotes de dados do servidor, armazenando-os em um mapa ordenado por número de sequência, e depois os concatena para reconstruir o arquivo completo:
+    // Recebe os pacotes de dados do servidor e rastreia os faltantes durante a recepção:
     private void receiveFile(int expectedSegments, String filename) {
-        Map<Integer, byte[]> received = new TreeMap<>();
+        Map<Integer, byte[]> received = new TreeMap<>(); // Mapa para armazenar os segmentos recebidos, ordenado por número de sequência
 
-        // Loop de recepção dos pacotes de dados do servidor:
-        while (true) {
-            try {
-                // Recebe um pacote do servidor e tenta deserializá-lo em um objeto Packet:
-                DatagramPacket udpPacket = receivePacket();
-                byte[] raw = Arrays.copyOf(udpPacket.getData(), udpPacket.getLength());
-                Packet packet = Packet.deserialize(raw);
+        int retries = 0;
+        while (retries <= Protocol.MAX_RETRIES) {
 
-                if (packet.isData()) {
-                    if (shouldDrop(packet.getSequenceNumber())) {
-                        // Segmento descartado — não insere no mapa
-                        continue;
-                    } else {
-                        // Armazena o payload do pacote no mapa, usando o número de sequência como chave para garantir a ordem correta:
-                        received.put(packet.getSequenceNumber(), packet.getPayload()); 
+            // Loop de recepção, aguarda pacotes até receber FLAG_END ou timeout:
+            while (true) {
+                try {
+                    // Recebe um pacote do servidor e tenta deserializá-lo em um objeto Packet:
+                    DatagramPacket udpPacket = receivePacket();
+                    byte[] raw = Arrays.copyOf(udpPacket.getData(), udpPacket.getLength());
+                    Packet packet = Packet.deserialize(raw);
+
+                    if (packet.isData()) {
+                        if (shouldDrop(packet.getSequenceNumber())) {
+                            // Segmento descartado — não insere no mapa
+                            continue;
+                        }
+                        // Armazena o payload no mapa usando o número de sequência como chave:
+                        received.put(packet.getSequenceNumber(), packet.getPayload());
                         System.out.println("[Cliente] DATA seq=" + packet.getSequenceNumber());
+                    } else if (packet.isEnd()) {
+                        System.out.println("[Cliente] END recebido");
+                        break;
                     }
-                } else if (packet.isEnd()) {
-                    System.out.println("[Cliente] END recebido");
+
+                } catch (SocketTimeoutException e) {
+                    // Timeout encerra o ciclo de recepção — os faltantes serão solicitados na próxima iteração:
+                    System.out.println("[Cliente] Timeout aguardando segmentos.");
                     break;
+                } catch (Exception e) {
+                    System.out.println("[Cliente] Erro ao receber segmento: " + e.getMessage());
                 }
-            } catch (Exception e) {
-                System.out.println("[Cliente] Erro: " + e.getMessage());
             }
-        }
-        System.out.println("[Cliente] Recebidos: " + received.size() + "/" + expectedSegments);
 
-        // Concatena os payloads em ordem (TreeMap já garante ordem por sequência):
-        int totalBytes = 0;
-        for (byte[] chunk : received.values()) totalBytes += chunk.length;
+            System.out.println("[Cliente] Recebidos: " + received.size() + "/" + expectedSegments);
 
-        // Cria um array para armazenar o conteúdo completo do arquivo, alocando o tamanho total necessário:
-        byte[] fileData = new byte[totalBytes];
-        int offset = 0;
-        for (byte[] chunk : received.values()) {
-            System.arraycopy(chunk, 0, fileData, offset, chunk.length);
-            offset += chunk.length;
+            // Compara o mapa atual com o intervalo esperado de números de sequência (0 a expectedSegments-1):
+            Set<Integer> missing = new HashSet<>();
+            for (int i = 0; i < expectedSegments; i++) {
+                if (!received.containsKey(i)) {
+                    missing.add(i); // Insere o número de sequência faltante na lista de faltantes
+                }
+            }
+            
+            if (missing.isEmpty()) break; // Encerra o loop de retransmissão se nenhum faltante foi encontrado
+            if (retries == Protocol.MAX_RETRIES) {  // Se ainda há faltantes mas o limite de tentativas foi atingido, abandona a transferência:
+                System.out.println("[Cliente] Transferência incompleta após " + Protocol.MAX_RETRIES + " tentativas. Segmentos faltantes: " + missing);
+                return;
+            }
+
+            // Solicita a retransmissão dos segmentos faltantes:
+            try {
+                requestRetransmission(missing);
+            } catch (IOException e) {
+                System.err.println("[Cliente] Erro ao solicitar retransmissão: " + e.getMessage());
+            }
+
+            retries++;
         }
 
-        // Grava em disco:
-        String outputName = "received_" + filename;
-        try (FileOutputStream fos = new FileOutputStream(outputName)) {
-            fos.write(fileData);
-            System.out.println("[Cliente] Arquivo salvo como: " + outputName);
-        } catch (IOException e) {
-            System.err.println("[Cliente] Erro ao salvar arquivo: " + e.getMessage());
-        }
+        saveFile(received, filename);
+    }
+
+    // Envia um pacote NACK para o servidor com a lista dos números de sequência dos segmentos faltantes, separados por vírgula:
+    private void requestRetransmission(Set<Integer> missing) throws IOException {
+        if (missing.isEmpty()) return;
+
+        // Serializa os números de sequência faltantes como uma string separada por vírgulas:
+        String payload = String.join(",", missing.stream().map(String::valueOf).toArray(String[]::new));
+        byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8); // Converte a string para bytes
+
+        Packet nackPacket = new Packet(
+            0, 
+            Protocol.FLAG_NACK, 
+            payloadBytes
+        );
+        sendPacket(nackPacket);
+
+        System.out.println("[Cliente] NACK enviado para segmentos: " + payload);
     }
 
     // Simula a perda de pacotes com base na taxa de perda definida (LOSS_RATE):
@@ -140,6 +177,21 @@ public class Client {
         }
         return false;
     }
+
+    // Concatena os payloads do mapa em ordem de sequência e grava o arquivo reconstruído em disco:
+    private void saveFile(Map<Integer, byte[]> received, String filename) {
+        String outputName = "received_" + filename;
+        try (FileOutputStream fos = new FileOutputStream(outputName)) {
+            for (byte[] chunk : received.values()) {
+                fos.write(chunk); // TreeMap garante que os chunks são escritos na ordem correta de sequência
+            }
+            System.out.println("[Cliente] Arquivo salvo como: " + outputName);
+        } catch (IOException e) {
+            System.err.println("[Cliente] Erro ao salvar arquivo: " + e.getMessage());
+        }
+    }
+
+    // ---- Métodos relacionados ao controle do usuário pelo console ----
 
     // Lê uma linha digitada pelo usuário no console:
     private String readUserInput() {
