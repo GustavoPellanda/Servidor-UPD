@@ -10,6 +10,7 @@
 8. Implementar controle de sequência ✓
 9. Implementar simulação de perda ✓
 10. Implementar retransmissão ✓
+11. Implementar verificação de integridade
 
 ---
 
