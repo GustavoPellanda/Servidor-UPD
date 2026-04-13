@@ -71,13 +71,18 @@ public class Server {
         ); 
         socket.send(udpPacket);
 
-        // Armazena as informações da transferência para uso em retransmissões futuras (se necessário):
-        this.lastFilename = filename;
-        this.lastAddr = addr;
-        this.lastPort = port;
-        
-        System.out.println("[Servidor] Enviado START para " + addr.getHostAddress() + ":" + port);
-        sendFile(file, addr, port);    
+        try {
+            sendFile(file, addr, port);
+
+            System.out.println("[Servidor] Transferência concluída com sucesso.");
+            // Armazena as informações da transferência para uso em retransmissões futuras (se necessário):
+            this.lastFilename = filename;
+            this.lastAddr = addr;
+            this.lastPort = port;
+
+        } catch (IOException e) {
+            System.err.println("[Servidor] Falha durante envio: " + e.getMessage());
+        }
     }
 
     // Envia o conteúdo do arquivo para o cliente, dividindo-o em chunks e enviando cada chunk como um pacote separado:
