@@ -13,9 +13,14 @@ import Protocol.Packet;
 
 public class Server {
 
-    private static final int PORT = 9876;        // Porta onde o servidor escuta por mensagens dos clientes
-    private final DatagramSocket socket;         // Socket UDP usado para enviar e receber datagramas
-    private boolean running;                     // Flag para controlar o loop principal do servidor
+    private static final int PORT = 9876;   // Porta onde o servidor escuta por mensagens dos clientes
+    private final DatagramSocket socket;    // Socket UDP usado para enviar e receber datagramas
+    private boolean running;                // Flag para controlar o loop principal do servidor
+    
+    private String lastFilename;   // Nome do último arquivo solicitado
+    private InetAddress lastAddr;  // Endereço do cliente da última transferência
+    private int lastPort;          // Porta do cliente da última transferência
+
     private static final int BUFFER_SIZE = Protocol.HEADER_SIZE + Protocol.MAX_PAYLOAD; // Tamanho do buffer para receber mensagens (em bytes)
 
     public Server() throws SocketException {     // Pode lançar SocketException se a porta já estiver em uso ou houver problema de rede
@@ -65,6 +70,11 @@ public class Server {
             port
         ); 
         socket.send(udpPacket);
+
+        // Armazena as informações da transferência para uso em retransmissões futuras (se necessário):
+        this.lastFilename = filename;
+        this.lastAddr = addr;
+        this.lastPort = port;
         
         System.out.println("[Servidor] Enviado START para " + addr.getHostAddress() + ":" + port);
         sendFile(file, addr, port);    
@@ -135,6 +145,69 @@ public class Server {
         socket.send(udpPacket);
     }
 
+    // Processa um NACK recebido, retransmitindo apenas os segmentos solicitados pelo cliente:
+    private void handleNack(Packet packet) throws IOException {
+        if (lastFilename == null) {
+            System.out.println("[Servidor] NACK recebido sem transferência ativa.");
+            return;
+        }
+
+        // Extrai a lista de sequências faltantes do payload do NACK:
+        String payload = new String(packet.getPayload(), StandardCharsets.UTF_8);
+        String[] parts = payload.split(",");
+
+        System.out.println("[Servidor] NACK recebido — retransmitindo segmentos: " + payload);
+
+        File file = new File(lastFilename);
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r");
+        byte[] buffer = new byte[Protocol.CHUNK_SIZE];
+
+        // Para cada número de sequência faltante, calcula a posição no arquivo e retransmite o chunk:
+        for (String part : parts) {
+            int seq = Integer.parseInt(part.trim());
+            long position = (long) seq * Protocol.CHUNK_SIZE; // Posição em bytes do início desse segmento no arquivo
+
+            raf.seek(position); // Salta para a posição correta no arquivo
+            int bytesRead = raf.read(buffer);
+
+            if (bytesRead <= 0) continue;
+
+            byte[] chunk = Arrays.copyOf(buffer, bytesRead);
+
+            Packet dataPacket = new Packet(
+                seq,
+                Protocol.FLAG_DATA,
+                chunk
+            );
+            byte[] data = dataPacket.serialize();
+
+            DatagramPacket udpPacket = new DatagramPacket(
+                data,
+                data.length,
+                lastAddr,
+                lastPort
+            );
+            socket.send(udpPacket);
+
+            System.out.println("[Servidor] RETRANSMITIDO seq=" + seq);
+        }
+
+        raf.close();
+
+        // Pacote de término sinalizando o fim da retransmissão:
+        Packet endPacket = new Packet(0, Protocol.FLAG_END);
+        byte[] endData = endPacket.serialize();
+        DatagramPacket endUdp = new DatagramPacket(
+            endData,
+            endData.length,
+            lastAddr,
+            lastPort
+        );
+        socket.send(endUdp);
+
+        System.out.println("[Servidor] END enviado após retransmissão");
+    }
+
     // ---- Métodos para o funcionamento básico do servidor ----
 
     // Recebe um datagrama do cliente:
@@ -160,6 +233,8 @@ public class Server {
                 if (packet.isGet()) {
                     String filename = new String(packet.getPayload(), StandardCharsets.UTF_8); // Converte o payload do pacote GET de volta para uma string
                     handleGet(filename, request.getAddress(), request.getPort());
+                } else if (packet.isNack()) {
+                    handleNack(packet);
                 } else {
                     System.out.println("[Servidor] Comando desconhecido.");
                 }

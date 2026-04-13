@@ -11,7 +11,6 @@ public class Packet {
     private final short dataLength;
     private final byte[] payload;
 
-    // Construtor principal
     public Packet(int sequenceNumber, byte flags, byte[] payload) {
         this.sequenceNumber = sequenceNumber;
         this.flags = flags;
@@ -20,7 +19,7 @@ public class Packet {
         this.checksum = calculateChecksum();
     }
 
-    // Construtor para pacotes sem payload (END, ACK futuramente)
+    // Construtor para pacotes sem payload (ex: ACK, NACK, END):
     public Packet(int sequenceNumber, byte flags) {
         this(sequenceNumber, flags, new byte[0]);
     }
@@ -98,6 +97,7 @@ public class Packet {
     public boolean isData()  { return flags == Protocol.FLAG_DATA; }
     public boolean isEnd()   { return flags == Protocol.FLAG_END; }
     public boolean isError() { return flags == Protocol.FLAG_ERROR; }
+    public boolean isNack()  { return flags == Protocol.FLAG_NACK; }
 
     @Override
     public String toString() {
