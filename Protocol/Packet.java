@@ -3,20 +3,33 @@ package Protocol;
 import java.nio.ByteBuffer;
 import java.util.zip.CRC32;
 
+// Classe que representa um pacote de dados ou controle na comunicação UDP:
+
 public class Packet {
 
+    // Campos do cabeçalho do pacote:
     private final int sequenceNumber;
     private final int checksum;
     private final byte flags;
     private final short dataLength;
     private final byte[] payload;
 
+    // Construtor privado usado internamente para criar um pacote a partir de seus componentes, incluindo o checksum calculado:
+    private Packet(int sequenceNumber, byte flags, byte[] payload, int checksum) {
+        this.sequenceNumber = sequenceNumber;
+        this.flags = flags;
+        this.payload = (payload != null) ? payload.clone() : new byte[0];
+        this.dataLength = (short) this.payload.length;
+        this.checksum = checksum;
+    }
+
+    // Construtor público para criar um pacote a partir de seus componentes, calculando o checksum automaticamente:
     public Packet(int sequenceNumber, byte flags, byte[] payload) {
         this.sequenceNumber = sequenceNumber;
         this.flags = flags;
         this.payload = (payload != null) ? payload.clone() : new byte[0];
         this.dataLength = (short) this.payload.length;
-        this.checksum = calculateChecksum();
+        this.checksum = calculateChecksum(); 
     }
 
     // Construtor para pacotes sem payload (ex: ACK, NACK, END):
@@ -39,8 +52,9 @@ public class Packet {
         return (int) crc.getValue();
     }
 
-    public boolean isValid() {
-        return this.checksum == calculateChecksum();
+    // Verifica se o checksum do pacote é válido comparando o checksum calculado com o checksum recebido:
+    public boolean isValid(int expectedChecksum) {
+        return calculateChecksum() == expectedChecksum;
     }
 
     // Serializa o pacote em um array de bytes para envio:
@@ -70,6 +84,7 @@ public class Packet {
         byte flags = buffer.get();
         short length = buffer.getShort();
 
+        // Validação do tamanho do payload:
         if (length < 0 || length > (data.length - Protocol.HEADER_SIZE)) {
             throw new IllegalArgumentException("Tamanho de payload inválido");
         }
@@ -77,9 +92,15 @@ public class Packet {
         byte[] payload = new byte[length];
         buffer.get(payload);
 
-        Packet packet = new Packet(seq, flags, payload);
+        Packet packet = new Packet(
+            seq, 
+            flags, 
+            payload, 
+            checksum
+        );
 
-        if (!packet.isValid()) {
+        // Validação: checksum recebido vs checksum calculado:
+        if (packet.calculateChecksum() != checksum) {
             throw new IllegalArgumentException("Checksum inválido");
         }
 
@@ -91,6 +112,7 @@ public class Packet {
     public byte getFlags()         { return flags; }
     public short getDataLength()   { return dataLength; }
     public byte[] getPayload()     { return payload.clone(); }
+    
     // Métodos auxiliares para verificar o tipo do pacote com base nas flags:
     public boolean isGet()   { return flags == Protocol.FLAG_GET; }
     public boolean isStart() { return flags == Protocol.FLAG_START; }
