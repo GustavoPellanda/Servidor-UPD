@@ -1,3 +1,5 @@
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.net.DatagramPacket;
@@ -74,7 +76,8 @@ public class Client {
                 String meta = new String(packet.getPayload(), StandardCharsets.UTF_8);
                 String[] parts = meta.split("\\|"); // Espera-se que o payload do START seja "START|numSegments"
                 int numSegments = Integer.parseInt(parts[1]); // Extrai o número de segmentos que o servidor enviará, para controle de recebimento
-                receiveFile(numSegments, filename); 
+                String expectedMD5 = parts[2]; // Hash do arquivo completo enviado pelo servidor
+                receiveFile(numSegments, filename, expectedMD5); 
             } else if (packet.isError()) {
                 String errorMsg = new String(packet.getPayload(), StandardCharsets.UTF_8);
                 System.out.println("[Cliente] Erro do servidor: " + errorMsg);
@@ -86,7 +89,7 @@ public class Client {
     }
 
     // Recebe os pacotes de dados do servidor e rastreia os faltantes durante a recepção:
-    private void receiveFile(int expectedSegments, String filename) {
+    private void receiveFile(int expectedSegments, String filename, String expectedMD5) {
         Map<Integer, byte[]> received = new TreeMap<>(); // Mapa para armazenar os segmentos recebidos, ordenado por número de sequência
 
         int retries = 0;
@@ -148,7 +151,7 @@ public class Client {
             retries++;
         }
 
-        saveFile(received, filename);
+        saveFile(received, filename, expectedMD5);
     }
 
     // Envia um pacote NACK para o servidor com a lista dos números de sequência dos segmentos faltantes, separados por vírgula:
@@ -179,7 +182,7 @@ public class Client {
     }
 
     // Concatena os payloads do mapa em ordem de sequência e grava o arquivo reconstruído em disco:
-    private void saveFile(Map<Integer, byte[]> received, String filename) {
+    private void saveFile(Map<Integer, byte[]> received, String filename, String expectedMD5) {
         String outputName = "received_" + filename;
         try (FileOutputStream fos = new FileOutputStream(outputName)) {
             for (byte[] chunk : received.values()) {
@@ -188,6 +191,50 @@ public class Client {
             System.out.println("[Cliente] Arquivo salvo como: " + outputName);
         } catch (IOException e) {
             System.err.println("[Cliente] Erro ao salvar arquivo: " + e.getMessage());
+        }
+
+        // Verifica a integridade do arquivo salvo comparando o MD5 com o hash recebido no START:
+        try {
+            String actualMD5 = calculateMD5(new java.io.File(outputName));
+            if (actualMD5.equals(expectedMD5)) {
+                System.out.println("[Cliente] Integridade verificada — MD5 OK: " + actualMD5);
+            } else {
+                System.out.println("[Cliente] ERRO DE INTEGRIDADE — MD5 não confere!");
+                System.out.println("[Cliente] Esperado: " + expectedMD5);
+                System.out.println("[Cliente] Recebido: " + actualMD5);
+            }
+        } catch (IOException e) {
+            System.err.println("[Cliente] Erro ao verificar integridade: " + e.getMessage());
+        }
+
+    }
+
+    // Método auxiliar para calcular o checksum MD5 de um arquivo, usado para validar a integridade dos dados transferidos:
+    private String calculateMD5(File file) throws IOException {
+        try {
+            // Usa a classe MessageDigest para calcular o hash MD5 do arquivo, lendo-o em chunks para evitar sobrecarregar a memória:
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            FileInputStream fis = new FileInputStream(file);
+            byte[] buffer = new byte[Protocol.CHUNK_SIZE];
+            int bytesRead;
+
+            // Lê o arquivo em chunks, atualizando o digest com cada chunk lido:
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
+            }
+
+            fis.close();
+
+            // Converte o array de bytes do digest para uma string hexadecimal:
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString(); // Retorna a string hexadecimal do hash MD5 do arquivo
+
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IOException("Algoritmo MD5 não disponível", e);
         }
     }
 

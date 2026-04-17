@@ -51,7 +51,8 @@ public class Server {
         System.out.println("[Servidor] GET recebido para arquivo: " + filename);
         System.out.println("[Servidor] Tamanho: " + fileSize + " bytes | Segmentos: " + numSegments);
 
-        String meta = fileSize + "|" + numSegments; // Formato do payload do START: "tamanho|numSegmentos"
+        String md5 = calculateMD5(file); // Calcula o hash MD5 do arquivo completo para verificação de integridade pelo cliente
+        String meta = fileSize + "|" + numSegments + "|" + md5; // Formato do payload do START: "tamanho|numSegmentos|md5"
         byte[] metaBytes = meta.getBytes(StandardCharsets.UTF_8); // Converte a string de metadados para bytes usando UTF-8
         
         // Cria um pacote START com sequência 0, flag de START e o payload de metadados do arquivo:
@@ -211,6 +212,35 @@ public class Server {
         socket.send(endUdp);
 
         System.out.println("[Servidor] END enviado após retransmissão");
+    }
+
+    // Método auxiliar para calcular o checksum MD5 de um arquivo, usado para validar a integridade dos dados transferidos:
+    private String calculateMD5(File file) throws IOException {
+        try {
+            // Usa a classe MessageDigest para calcular o hash MD5 do arquivo, lendo-o em chunks para evitar sobrecarregar a memória:
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("MD5");
+            FileInputStream fis = new FileInputStream(file);
+            byte[] buffer = new byte[Protocol.CHUNK_SIZE];
+            int bytesRead;
+
+            // Lê o arquivo em chunks, atualizando o digest com cada chunk lido:
+            while ((bytesRead = fis.read(buffer)) != -1) {
+                md.update(buffer, 0, bytesRead);
+            }
+
+            fis.close();
+
+            // Converte o array de bytes do digest para uma string hexadecimal:
+            byte[] digest = md.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : digest) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString(); // Retorna a string hexadecimal do hash MD5 do arquivo
+
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IOException("Algoritmo MD5 não disponível", e);
+        }
     }
 
     // ---- Métodos para o funcionamento básico do servidor ----
