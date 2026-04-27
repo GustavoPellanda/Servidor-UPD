@@ -22,6 +22,8 @@ public class ClientSession {
     private final int port;              // Porta UDP do cliente desta sessão
     private final DatagramSocket socket; // Socket compartilhado do servidor — usado para enviar respostas a este cliente
     private String lastFilename;         // Nome do último arquivo solicitado por este cliente (usado em retransmissões via NACK)
+    private int lastNumSegments;         // Número de segmentos da última transferência, para calcular o tamanho total do bitmap
+    private byte[] nackBitmapBuffer;     // Buffer de acumulação dos fragmentos do bitmap de NACK
 
     public ClientSession(InetAddress addr, int port, DatagramSocket socket) {
         this.addr   = addr;
@@ -82,8 +84,9 @@ public class ClientSession {
             sendFile(file);
 
             System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] Transferência concluída com sucesso.");
-            // Armazena o nome do arquivo para uso em retransmissões futuras solicitadas via NACK:
-            this.lastFilename = filename;
+            this.lastFilename = filename; // Armazena o nome do arquivo para uso em retransmissões futuras solicitadas via NACK
+            this.lastNumSegments = numSegments;
+            this.nackBitmapBuffer = new byte[(int) Math.ceil(numSegments / 8.0)]; // Prepara o buffer de bitmap para acumular os NACKs futuros
 
         } catch (IOException e) {
             System.err.println("[Sessão " + addr.getHostAddress() + ":" + port + "] Falha durante envio: " + e.getMessage());
@@ -149,20 +152,32 @@ public class ClientSession {
             return;
         }
 
-        // Lê o bitmap diretamente do payload do pacote NACK:
-        byte[] bitmap = packet.getPayload();
+        // Copia o fragmento recebido para a posição correta do buffer acumulador — o offset em bytes dentro do bitmap completo é carregado no sequenceNumber do pacote:
+        int offset = packet.getSequenceNumber();
+        byte[] fragment = packet.getPayload();
+        System.arraycopy(fragment, 0, nackBitmapBuffer, offset, fragment.length);
 
-        System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] NACK recebido — bitmap de " + bitmap.length + " bytes");
+        // Verifica se o bitmap está completo comparando o fim deste fragmento com o tamanho total do buffer. Enquanto incompleto, retorna sem retransmitir nem enviar END:
+        boolean isLastFragment = (offset + fragment.length == nackBitmapBuffer.length);
+        if (!isLastFragment) {
+            System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] Fragmento NACK recebido (offset=" + offset + ", " + fragment.length + " bytes) — aguardando restantes");
+            return;
+        }
+
+        System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] Bitmap NACK completo — processando retransmissão");
 
         File file = new File(lastFilename); // Reabre o arquivo para leitura
         java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r"); // Usa RandomAccessFile para permitir saltos aleatórios no arquivo
         byte[] buffer = new byte[Protocol.CHUNK_SIZE]; // Buffer para ler os chunks do arquivo durante a retransmissão
 
         // Itera sobre cada byte do bitmap e, dentro de cada byte, sobre cada bit:
-        for (int byteIndex = 0; byteIndex < bitmap.length; byteIndex++) {
+        for (int byteIndex = 0; byteIndex < nackBitmapBuffer.length; byteIndex++) {
             for (int bitIndex = 0; bitIndex < 8; bitIndex++) {
-                if ((bitmap[byteIndex] & (1 << bitIndex)) != 0) { // Se o bit estiver ativo (valor 1), o segmento está faltando e deve ser retransmitido 
+                if ((nackBitmapBuffer[byteIndex] & (1 << bitIndex)) != 0) { // Se o bit estiver ativo (valor 1), o segmento está faltando e deve ser retransmitido 
                     int seq = byteIndex * 8 + bitIndex; // O bit na posição (byteIndex * 8 + bitIndex) corresponde ao segmento de mesmo número de sequência
+
+                    if (seq >= lastNumSegments) continue; // Ignora bits de padding além do último segmento real
+
                     long position = (long) seq * Protocol.CHUNK_SIZE; // Posição em bytes do início desse segmento no arquivo
                     raf.seek(position); // Salta para a posição correta no arquivo
                     int bytesRead = raf.read(buffer); // Lê o chunk do arquivo correspondente a esse segmento
@@ -184,6 +199,9 @@ public class ClientSession {
             }
         }
         raf.close();
+
+        // Reinicia o buffer para a próxima rodada de NACK — caso o cliente precise solicitar retransmissão novamente após receber os segmentos desta rodada:
+        nackBitmapBuffer = new byte[nackBitmapBuffer.length];
 
         // Cria um pacote de término sinalizando o fim da retransmissão:
         Packet endPacket = new Packet(
