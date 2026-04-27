@@ -94,7 +94,7 @@ O socket é **compartilhado** entre todas as sessões e threads. Em UDP, o mesmo
 
 ### Isolamento de estado entre clientes
 
-Cada `ClientSession` encapsula exclusivamente o estado da transferência do seu cliente: o endereço e porta de destino, e o nome do último arquivo solicitado (`lastFilename`), usado para atender retransmissões via `NACK`. Não existe estado compartilhado entre sessões diferentes. Isso resolve um problema presente na versão single-cliente, onde `lastFilename`, `lastAddr` e `lastPort` eram campos do `Server` e seriam sobrescritos por um segundo cliente antes que o primeiro concluísse sua retransmissão.
+Cada `ClientSession` encapsula exclusivamente o estado da transferência do seu cliente: o endereço e porta de destino, o nome do último arquivo solicitado (`lastFilename`), o número de segmentos da última transferência (`lastNumSegments`) e o buffer de acumulação de fragmentos de NACK (`nackBitmapBuffer`). Não existe estado compartilhado entre sessões diferentes. Isso resolve um problema presente na versão single-cliente, onde `lastFilename`, `lastAddr` e `lastPort` eram campos do `Server` e seriam sobrescritos por um segundo cliente antes que o primeiro concluísse sua retransmissão.
 
 ---
 
@@ -127,7 +127,7 @@ O servidor então:
 3. Calcula o hash MD5 do arquivo completo para verificação de integridade pelo cliente
 4. Envia um pacote `FLAG_START` com os metadados
 5. Inicia o envio sequencial dos segmentos
-6. Armazena o nome do arquivo em `lastFilename` para uso em eventuais retransmissões via NACK
+6. Armazena o nome do arquivo em `lastFilename` e o número de segmentos em `lastNumSegments`, e pré-aloca o `nackBitmapBuffer` para uso em eventuais retransmissões via NACK
 
 Se o arquivo não existir, responde com um pacote `FLAG_ERROR` contendo a mensagem de erro.
 
@@ -184,15 +184,36 @@ O segmento não é inserido no mapa, como se nunca tivesse chegado. A simulaçã
 
 ### Detecção de perda e solicitação de retransmissão
 
-Após cada ciclo de recepção, o cliente compara as chaves do `TreeMap` com o intervalo esperado `[0, numSegments)`. Qualquer número de sequência ausente é adicionado ao conjunto `missing`. Se o conjunto não estiver vazio e o limite de tentativas não tiver sido atingido, o cliente envia um pacote `FLAG_NACK` cujo payload contém os números de sequência faltantes serializados como uma string separada por vírgulas:
+Após cada ciclo de recepção, o cliente compara as chaves do `TreeMap` com o intervalo esperado `[0, numSegments)`. Qualquer número de sequência ausente é adicionado ao conjunto `missing`. Se o conjunto não estiver vazio, o cliente serializa os segmentos faltantes como um **bitmap binário** e o envia ao servidor via um ou mais pacotes `FLAG_NACK`.
+
+#### Formato do bitmap
+
+O bitmap possui um bit por segmento esperado — `ceil(numSegments / 8.0)` bytes no total. O bit na posição `seq` é ativado se o segmento `seq` está faltando:
 
 ```
-Packet[seq=0, flags=FLAG_NACK, payload="2,5,11"]
+byte[seq/8] |= (1 << (seq % 8))
 ```
 
-O servidor, ao receber o `FLAG_NACK`, usa `RandomAccessFile` para saltar diretamente para a posição de cada segmento faltante no arquivo (`seq * CHUNK_SIZE`) e retransmite apenas esses chunks. Ao final, envia um novo `FLAG_END` para sinalizar o término da retransmissão.
+Essa representação é muito mais compacta que uma lista textual de sequências: 7000 segmentos faltantes que ocupariam ~42 KB em texto ocupam apenas 875 bytes em bitmap.
 
-O cliente repete esse ciclo até que todos os segmentos sejam recebidos ou o limite de `MAX_RETRIES` tentativas seja atingido. Se o limite for esgotado com segmentos ainda faltando, a transferência é abandonada e o arquivo não é salvo.
+#### Fragmentação do NACK
+
+Se o bitmap ultrapassar o `MAX_PAYLOAD` (1461 bytes) — o que ocorre para arquivos maiores que ~17 GB — o cliente o fragmenta automaticamente em múltiplos pacotes `FLAG_NACK` de até 1461 bytes cada. O campo `sequenceNumber` de cada fragmento carrega o **offset em bytes** do fragmento dentro do bitmap completo, permitindo que o servidor remonte a posição correta de cada bit:
+
+```
+Packet[seq=0,    flags=FLAG_NACK, payload=<bitmap bytes 0..1460>]
+Packet[seq=1461, flags=FLAG_NACK, payload=<bitmap bytes 1461..2921>]
+...
+Packet[seq=N,    flags=FLAG_NACK, payload=<bitmap bytes N..fim>]
+```
+
+#### Acumulação no servidor
+
+O servidor não processa cada fragmento de NACK imediatamente. Ele acumula os fragmentos recebidos no `nackBitmapBuffer` da sessão, posicionando cada um no offset correto via `System.arraycopy`. Somente quando o último fragmento chega — identificado pela condição `offset + fragment.length == nackBitmapBuffer.length` — o servidor itera sobre os bits do bitmap completo e retransmite os segmentos faltantes. Ao final, envia um único `FLAG_END` sinalizando o término de toda a retransmissão. Isso evita que o cliente interprete ENDs intermediários de fragmentos como fim da retransmissão. O buffer é zerado ao final de cada rodada para que a próxima não seja contaminada por bits de rodadas anteriores.
+
+#### Critério de abandono por estagnação
+
+O cliente não conta o número total de rodadas, mas sim o número de **rodadas consecutivas sem progresso**. A cada ciclo, o número de segmentos faltantes é comparado com o da rodada anterior: se diminuiu, o contador de estagnação é zerado; se permaneceu igual, o contador é incrementado. A transferência só é abandonada quando o contador atinge `MAX_RETRIES` — ou seja, quando `MAX_RETRIES` rodadas seguidas não recuperaram nenhum segmento novo. Isso garante que rodadas bem-sucedidas não consumam o limite de tentativas, permitindo que a transferência convirja mesmo com taxas de perda altas.
 
 ---
 
@@ -227,14 +248,18 @@ main()
                      │    ├── File.exists()
                      │    ├── calculateMD5()
                      │    ├── Packet(FLAG_START) → socket.send()
-                     │    └── sendFile()
-                     │         ├── FileInputStream.read()
-                     │         ├── Packet(FLAG_DATA, seq, chunk) → socket.send()
-                     │         └── Packet(FLAG_END) → socket.send()
+                     │    ├── sendFile()
+                     │    │    ├── FileInputStream.read()
+                     │    │    ├── Packet(FLAG_DATA, seq, chunk) → socket.send()
+                     │    │    └── Packet(FLAG_END) → socket.send()
+                     │    └── inicializa lastFilename, lastNumSegments, nackBitmapBuffer
                      └── handleNack()                       (FLAG_NACK)
-                          ├── extrai lista de sequências do payload
+                          ├── copia fragmento no offset correto do nackBitmapBuffer
+                          ├── se bitmap incompleto → return (aguarda próximo fragmento)
+                          ├── itera bits do nackBitmapBuffer → identifica segmentos faltantes
                           ├── RandomAccessFile.seek(seq * CHUNK_SIZE)
                           ├── Packet(FLAG_DATA, seq, chunk) → socket.send()  (para cada faltante)
+                          ├── zera nackBitmapBuffer para a próxima rodada
                           └── Packet(FLAG_END) → socket.send()
 ```
 
@@ -249,7 +274,7 @@ main()
            ├── receivePacket()
            ├── Packet.deserialize()
            └── receiveFile()
-                └── loop (até MAX_RETRIES):
+                └── loop (até MAX_RETRIES consecutivos sem progresso):
                      ├── loop de recepção:
                      │    ├── receivePacket()
                      │    ├── Packet.deserialize()
@@ -257,8 +282,14 @@ main()
                      │    └── break em FLAG_END ou timeout
                      ├── compara TreeMap com [0, numSegments) → conjunto missing
                      ├── se missing vazio → break
-                     ├── requestRetransmission() → Packet(FLAG_NACK) → sendPacket()
-                     └── (repete o ciclo)
+                     ├── compara missing.size() com previousMissingCount
+                     │    ├── se diminuiu → retriesWithoutProgress = 0
+                     │    └── se igual → retriesWithoutProgress++
+                     ├── se retriesWithoutProgress > MAX_RETRIES → abandona
+                     └── requestRetransmission()
+                          ├── monta bitmap binário dos segmentos faltantes
+                          └── loop de fragmentação:
+                               └── Packet(FLAG_NACK, offset, fragmento) → sendPacket()
                 └── saveFile()
                      ├── FileOutputStream.write() → grava chunks em ordem do TreeMap
                      └── calculateMD5() → compara com hash recebido no START
