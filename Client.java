@@ -188,15 +188,26 @@ public class Client {
             bitmap[seq / 8] |= (byte) (1 << (seq % 8));
         }
 
-        // Cria um pacote NACK com o bitmap como payload:
-        Packet nackPacket = new Packet(
-            0,
-            Protocol.FLAG_NACK,
-            bitmap
-        );
-        sendPacket(nackPacket);
+        // Como o bitmap pode exceder o payload máximo, divide-o em fragmentos de MAX_PAYLOAD bytes e envia um pacote NACK para cada fragmento:
+        int totalFragments = (int) Math.ceil((double) bitmap.length / Protocol.MAX_PAYLOAD);
+        for (int i = 0; i < totalFragments; i++) {
+            int offset = i * Protocol.MAX_PAYLOAD;
+            int length = Math.min(Protocol.MAX_PAYLOAD, bitmap.length - offset);
 
-        System.out.println("[Cliente] NACK enviado — " + missing.size() + " segmentos faltantes (bitmap de " + bitmap.length + " bytes)");
+            byte[] fragment = Arrays.copyOfRange(bitmap, offset, offset + length);
+
+            // Cria um pacote NACK com o fragmento do bitmap como payload, onde o número de sequência indica o offset em bytes dentro do bitmap original:
+            Packet nackPacket = new Packet(
+                offset,
+                Protocol.FLAG_NACK,
+                fragment
+            );
+            sendPacket(nackPacket);
+
+            System.out.println("[Cliente] NACK fragmento " + (i + 1) + "/" + totalFragments + " enviado (offset=" + offset + ", " + fragment.length + " bytes)");
+        }
+
+        System.out.println("[Cliente] NACK enviado — " + missing.size() + " segmentos faltantes" + " em " + totalFragments + " fragmento(s) (bitmap total de " + bitmap.length + " bytes)");
     }
 
     // Simula a perda de pacotes com base na taxa de perda definida (LOSS_RATE):
