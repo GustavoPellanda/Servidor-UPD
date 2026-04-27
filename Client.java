@@ -114,8 +114,10 @@ public class Client {
     private void receiveFile(int expectedSegments, String filename, String expectedMD5) {
         Map<Integer, byte[]> received = new TreeMap<>(); // Mapa para armazenar os segmentos recebidos, ordenado por número de sequência
 
-        int retries = 0;
-        while (retries <= Protocol.MAX_RETRIES) {
+        int retriesWithoutProgress = 0; // Contador de rodadas consecutivas sem progresso
+        int previousMissingCount = expectedSegments; // Inicializado com o total de segmentos — nenhum recebido ainda
+
+        while (retriesWithoutProgress <= Protocol.MAX_RETRIES) {
 
             // Loop de recepção, aguarda pacotes até receber FLAG_END ou timeout:
             while (true) {
@@ -156,10 +158,21 @@ public class Client {
                     missing.add(i); // Insere o número de sequência faltante na lista de faltantes
                 }
             }
-            
+
             if (missing.isEmpty()) break; // Encerra o loop de retransmissão se nenhum faltante foi encontrado
-            if (retries == Protocol.MAX_RETRIES) {  // Se ainda há faltantes mas o limite de tentativas foi atingido, abandona a transferência:
-                System.out.println("[Cliente] Transferência incompleta após " + Protocol.MAX_RETRIES + " tentativas. Segmentos faltantes: " + missing);
+
+            // Se houve progresso (menos faltantes do que na última rodada), reseta o contador de tentativas sem progresso; caso contrário, incrementa o contador:
+            if (missing.size() < previousMissingCount) {
+                retriesWithoutProgress = 0;
+            } else {
+                retriesWithoutProgress++;
+            }
+
+            previousMissingCount = missing.size();
+
+            // Se ainda há faltantes mas o limite de tentativas sem progresso foi atingido, abandona a transferência:
+            if (retriesWithoutProgress > Protocol.MAX_RETRIES) {
+                System.out.println("[Cliente] Transferência incompleta — sem progresso após " + Protocol.MAX_RETRIES + " tentativas consecutivas. Segmentos faltantes: " + missing);
                 return;
             }
 
@@ -169,8 +182,6 @@ public class Client {
             } catch (IOException e) {
                 System.err.println("[Cliente] Erro ao solicitar retransmissão: " + e.getMessage());
             }
-
-            retries++;
         }
 
         saveFile(received, filename, expectedMD5);
