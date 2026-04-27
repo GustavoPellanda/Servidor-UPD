@@ -74,14 +74,8 @@ public class ClientSession {
             metaBytes
         );
         byte[] data = startPacket.serialize();
-
-        // Cria um DatagramPacket com os dados do START, o endereço do cliente e a porta do cliente para envio:
-        DatagramPacket udpPacket = new DatagramPacket(
-            data,
-            data.length,
-            addr,
-            port
-        );
+        // Transsforma o pacote START em um datagrama UDP e envia para o cliente usando o socket compartilhado do servidor:
+        DatagramPacket udpPacket = new DatagramPacket(data, data.length, addr, port);
         socket.send(udpPacket);
 
         try {
@@ -107,6 +101,7 @@ public class ClientSession {
         // Loop de leitura do arquivo em chunks, criando um pacote para cada chunk e enviando para o cliente:
         while ((bytesRead = fis.read(buffer)) != -1) {
             byte[] chunk = Arrays.copyOf(buffer, bytesRead);
+            
             // Cria um pacote de dados com o número de sequência atual, flag de DATA e o payload do chunk lido do arquivo:
             Packet packet = new Packet(
                 seq,
@@ -114,29 +109,20 @@ public class ClientSession {
                 chunk
             );
             byte[] data = packet.serialize();
-
-            // Cria um DatagramPacket com os dados do chunk, o endereço do cliente e a porta do cliente para envio:
-            DatagramPacket udpPacket = new DatagramPacket(
-                data,
-                data.length,
-                addr,
-                port
-            );
+            DatagramPacket udpPacket = new DatagramPacket(data, data.length, addr, port);
             socket.send(udpPacket);
 
             System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] DATA seq=" + seq);
             seq++;
         }
 
-        // Pacote de término com a sequência final e flag de END, sem payload:
-        Packet endPacket = new Packet(seq, Protocol.FLAG_END);
-        byte[] endData = endPacket.serialize();
-        DatagramPacket endUdp = new DatagramPacket(
-            endData,
-            endData.length,
-            addr,
-            port
+        // Cria um pacote de término com a sequência final e flag de END, sem payload:
+        Packet endPacket = new Packet(
+            seq, 
+            Protocol.FLAG_END
         );
+        byte[] endData = endPacket.serialize();
+        DatagramPacket endUdp = new DatagramPacket(endData, endData.length, addr, port);
         socket.send(endUdp);
 
         System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] END enviado");
@@ -152,12 +138,7 @@ public class ClientSession {
             msgBytes
         );
         byte[] data = errorPacket.serialize();
-        DatagramPacket udpPacket = new DatagramPacket(
-            data,
-            data.length,
-            addr,
-            port
-        );
+        DatagramPacket udpPacket = new DatagramPacket(data, data.length, addr, port);
         socket.send(udpPacket);
     }
 
@@ -168,57 +149,49 @@ public class ClientSession {
             return;
         }
 
-        // Extrai a lista de sequências faltantes do payload do NACK:
-        String payload = new String(packet.getPayload(), StandardCharsets.UTF_8);
-        String[] parts = payload.split(",");
+        // Lê o bitmap diretamente do payload do pacote NACK:
+        byte[] bitmap = packet.getPayload();
 
-        System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] NACK recebido — retransmitindo segmentos: " + payload);
+        System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] NACK recebido — bitmap de " + bitmap.length + " bytes");
 
-        File file = new File(lastFilename);
-        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r");
-        byte[] buffer = new byte[Protocol.CHUNK_SIZE];
+        File file = new File(lastFilename); // Reabre o arquivo para leitura
+        java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r"); // Usa RandomAccessFile para permitir saltos aleatórios no arquivo
+        byte[] buffer = new byte[Protocol.CHUNK_SIZE]; // Buffer para ler os chunks do arquivo durante a retransmissão
 
-        // Para cada número de sequência faltante, calcula a posição no arquivo e retransmite o chunk:
-        for (String part : parts) {
-            int seq = Integer.parseInt(part.trim());
-            long position = (long) seq * Protocol.CHUNK_SIZE; // Posição em bytes do início desse segmento no arquivo
+        // Itera sobre cada byte do bitmap e, dentro de cada byte, sobre cada bit:
+        for (int byteIndex = 0; byteIndex < bitmap.length; byteIndex++) {
+            for (int bitIndex = 0; bitIndex < 8; bitIndex++) {
+                if ((bitmap[byteIndex] & (1 << bitIndex)) != 0) { // Se o bit estiver ativo (valor 1), o segmento está faltando e deve ser retransmitido 
+                    int seq = byteIndex * 8 + bitIndex; // O bit na posição (byteIndex * 8 + bitIndex) corresponde ao segmento de mesmo número de sequência
+                    long position = (long) seq * Protocol.CHUNK_SIZE; // Posição em bytes do início desse segmento no arquivo
+                    raf.seek(position); // Salta para a posição correta no arquivo
+                    int bytesRead = raf.read(buffer); // Lê o chunk do arquivo correspondente a esse segmento
+                    if (bytesRead <= 0) continue;
 
-            raf.seek(position); // Salta para a posição correta no arquivo
-            int bytesRead = raf.read(buffer);
+                    // Cria um pacote de dados para o segmento faltante, usando o número de sequência correspondente e o chunk lido do arquivo:
+                    byte[] chunk = Arrays.copyOf(buffer, bytesRead);
+                    Packet dataPacket = new Packet(
+                        seq,
+                        Protocol.FLAG_DATA,
+                        chunk
+                    );
+                    byte[] data = dataPacket.serialize();
+                    DatagramPacket udpPacket = new DatagramPacket(data, data.length, addr, port);
+                    socket.send(udpPacket);
 
-            if (bytesRead <= 0) continue;
-
-            byte[] chunk = Arrays.copyOf(buffer, bytesRead);
-
-            Packet dataPacket = new Packet(
-                seq,
-                Protocol.FLAG_DATA,
-                chunk
-            );
-            byte[] data = dataPacket.serialize();
-
-            DatagramPacket udpPacket = new DatagramPacket(
-                data,
-                data.length,
-                addr,
-                port
-            );
-            socket.send(udpPacket);
-
-            System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] RETRANSMITIDO seq=" + seq);
+                    System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] RETRANSMITIDO seq=" + seq);
+                }
+            }
         }
-
         raf.close();
 
-        // Pacote de término sinalizando o fim da retransmissão:
-        Packet endPacket = new Packet(0, Protocol.FLAG_END);
-        byte[] endData = endPacket.serialize();
-        DatagramPacket endUdp = new DatagramPacket(
-            endData,
-            endData.length,
-            addr,
-            port
+        // Cria um pacote de término sinalizando o fim da retransmissão:
+        Packet endPacket = new Packet(
+            0, 
+            Protocol.FLAG_END
         );
+        byte[] endData = endPacket.serialize();
+        DatagramPacket endUdp = new DatagramPacket(endData, endData.length, addr, port);
         socket.send(endUdp);
 
         System.out.println("[Sessão " + addr.getHostAddress() + ":" + port + "] END enviado após retransmissão");

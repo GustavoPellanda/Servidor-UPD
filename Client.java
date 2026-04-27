@@ -165,7 +165,7 @@ public class Client {
 
             // Solicita a retransmissão dos segmentos faltantes:
             try {
-                requestRetransmission(missing);
+                requestRetransmission(missing, expectedSegments);
             } catch (IOException e) {
                 System.err.println("[Cliente] Erro ao solicitar retransmissão: " + e.getMessage());
             }
@@ -176,22 +176,27 @@ public class Client {
         saveFile(received, filename, expectedMD5);
     }
 
-    // Envia um pacote NACK para o servidor com a lista dos números de sequência dos segmentos faltantes, separados por vírgula:
-    private void requestRetransmission(Set<Integer> missing) throws IOException {
+    // Envia um pacote NACK para o servidor solicitando a retransmissão dos segmentos faltantes, utilizando um bitmap para indicar quais segmentos precisam ser reenviados:
+    private void requestRetransmission(Set<Integer> missing, int numSegments) throws IOException {
         if (missing.isEmpty()) return;
 
-        // Serializa os números de sequência faltantes como uma string separada por vírgulas:
-        String payload = String.join(",", missing.stream().map(String::valueOf).toArray(String[]::new));
-        byte[] payloadBytes = payload.getBytes(StandardCharsets.UTF_8); // Converte a string para bytes
+        // Calcula o tamanho do bitmap necessário para representar os segmentos faltantes, considerando que cada byte pode representar 8 segmentos:
+        byte[] bitmap = new byte[(int) Math.ceil(numSegments / 8.0)];
 
+        // Preenche o bitmap com 1 nas posições correspondentes aos segmentos faltantes e 0 nas posições dos segmentos recebidos:
+        for (int seq : missing) {
+            bitmap[seq / 8] |= (byte) (1 << (seq % 8));
+        }
+
+        // Cria um pacote NACK com o bitmap como payload:
         Packet nackPacket = new Packet(
-            0, 
-            Protocol.FLAG_NACK, 
-            payloadBytes
+            0,
+            Protocol.FLAG_NACK,
+            bitmap
         );
         sendPacket(nackPacket);
 
-        System.out.println("[Cliente] NACK enviado para segmentos: " + payload);
+        System.out.println("[Cliente] NACK enviado — " + missing.size() + " segmentos faltantes (bitmap de " + bitmap.length + " bytes)");
     }
 
     // Simula a perda de pacotes com base na taxa de perda definida (LOSS_RATE):
