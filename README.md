@@ -1,19 +1,3 @@
-# Etapas do projeto previstas:
-
-1. Comunicação básica UDP ✓
-2. Definir protocolo ✓
-3. Implementar GET ✓
-4. Criar protocolo simples textual ✓
-5. Transformar o protocolo para usar packets binários ✓
-6. Implementar envio de arquivo sem confiabilidade ✓
-7. Implementar checksum ✓
-8. Implementar controle de sequência ✓
-9. Implementar simulação de perda ✓
-10. Implementar retransmissão ✓
-11. Implementar verificação de integridade
-
----
-
 # Visão geral do protocolo
 
 O protocolo opera inteiramente sobre UDP e define sua própria camada de confiabilidade. Toda comunicação entre cliente e servidor — incluindo requisições, respostas de controle, dados e erros — é encapsulada em pacotes binários do tipo `Packet`. Não há troca de mensagens textuais em nenhuma etapa.

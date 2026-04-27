@@ -18,25 +18,47 @@ import Protocol.Packet;
 import Protocol.Protocol;
  
 public class Client {
- 
-    private static final String SERVER_HOST = "localhost"; // Endereço do servidor
-    private static final int SERVER_PORT = 9876;           // Porta do servidor
+
+    private final String serverHost;     // Host definido pelo usuário
+    private final int serverPort;        // Porta definida pelo usuário
+    private final double lossRate;       // Taxa de perda definida pelo usuário
+
     private static final int TIMEOUT_MS  = 5000;           // Tempo máximo de espera pela resposta do servidor (em ms)
     private static final String EXIT_COMMAND = "sair";     // Comando que encerra o cliente
     private final DatagramSocket socket;                   // Socket UDP do cliente — porta local é atribuída automaticamente pelo SO
     private final InetAddress serverAddress;               // Endereço resolvido do servidor (hostname -> InetAddress)
     private final Scanner scanner;                         // Leitura da entrada do usuário no console
+    
     private static final int BUFFER_SIZE = Protocol.HEADER_SIZE + Protocol.MAX_PAYLOAD; // Tamanho do buffer de recepção (em bytes)
-
-    // Simulação de perda de pacotes (para teste do protocolo):
-    private static final double LOSS_RATE = 0.2; // 20% de chance de descartar cada segmento
     private final java.util.Random random = new java.util.Random(); // Gerador de números aleatórios para simular perda de pacotes
 
     public Client() throws IOException {
-        this.socket = new DatagramSocket(); // Cria o socket sem porta fixa, o SO escolhe uma porta disponível
-        this.socket.setSoTimeout(TIMEOUT_MS); // Configura timeout (sem isso, receive() bloquearia indefinidamente se o pacote fosse perdido)
-        this.serverAddress = InetAddress.getByName(SERVER_HOST); // Resolve o hostname para InetAddress uma única vez no construtor
-        this.scanner = new Scanner(System.in);  // Scanner para ler a entrada do usuário a partir do console
+        this.scanner = new Scanner(System.in);
+
+        // Solicita IP do servidor:
+        System.out.print("[Cliente] Informe o endereço IP do servidor: ");
+        this.serverHost = scanner.nextLine();
+
+        // Solicita porta do servidor:
+        System.out.print("[Cliente] Informe a porta do servidor: ");
+        this.serverPort = Integer.parseInt(scanner.nextLine());
+        if (serverPort < 1024 || serverPort > 65535) {
+            throw new IllegalArgumentException("Porta inválida.");
+        }
+
+        // Solicita taxa de perda:
+        System.out.print("[Cliente] Informe a taxa de perda (0.0 a 1.0): ");
+        this.lossRate = Double.parseDouble(scanner.nextLine());
+        if (lossRate < 0.0 || lossRate > 1.0) {
+            throw new IllegalArgumentException("Taxa de perda inválida.");
+        }
+
+        // Cria o socket UDP do cliente e define o timeout para recepção de pacotes:
+        this.socket = new DatagramSocket();
+        this.socket.setSoTimeout(TIMEOUT_MS);
+
+        // Resolve o hostname do servidor para um endereço IP:
+        this.serverAddress = InetAddress.getByName(serverHost);
     }
 
     // ---- Métodos genéricos para envio e recepção de pacotes ----
@@ -49,7 +71,7 @@ public class Client {
             data, 
             data.length, 
             serverAddress, 
-            SERVER_PORT
+            serverPort 
         );
         socket.send(udpPacket);
     }
@@ -174,7 +196,7 @@ public class Client {
 
     // Simula a perda de pacotes com base na taxa de perda definida (LOSS_RATE):
     private boolean shouldDrop(int sequenceNumber) {
-        if (random.nextDouble() < LOSS_RATE) {
+        if (random.nextDouble() < lossRate) {
             System.out.println("[Cliente] DESCARTADO seq=" + sequenceNumber + " (simulação de perda)");
             return true;
         }
@@ -260,7 +282,7 @@ public class Client {
  
     // Loop principal do cliente:
     public void start() {
-        System.out.println("[Cliente] Conectado a " + SERVER_HOST + ":" + SERVER_PORT);
+        System.out.println("[Cliente] Conectado a " + serverHost + ":" + serverPort);
         System.out.println("[Cliente] Digite o nome do arquivo que deseja buscar no servidor (ou '" + EXIT_COMMAND + "' para encerrar):");
 
         while (true) {
