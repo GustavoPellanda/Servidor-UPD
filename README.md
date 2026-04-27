@@ -40,11 +40,69 @@ O tamanho do payload por pacote é calculado a partir do MTU Ethernet (1500 byte
 
 ---
 
+# Arquitetura do servidor — multi-cliente com Thread Pool
+
+O servidor suporta múltiplos clientes simultâneos por meio de dois mecanismos combinados: **demultiplexação por sessão** e **processamento paralelo via pool de threads**. A responsabilidade do servidor está dividida em duas camadas distintas.
+
+---
+
+### Camada 1 — Thread principal: recepção e demultiplexação
+
+O servidor possui um único socket UDP vinculado à porta `9876`. Em UDP, diferentemente do TCP, não existe uma conexão por cliente — todos os datagramas de todos os clientes chegam pelo mesmo socket. Cabe ao servidor distingui-los.
+
+A thread principal executa um loop contínuo bloqueado em `socket.receive()`. A cada datagrama recebido, ela extrai o endereço IP e a porta de origem e forma uma chave de identificação única do cliente no formato `"ip:porta"`:
+
+```
+"192.168.0.10:52341"  →  Cliente A
+"192.168.0.17:61024"  →  Cliente B
+```
+
+Essa chave é usada para consultar um `ConcurrentHashMap<String, ClientSession>` que mantém o registro de todas as sessões ativas. Se o cliente já possui uma sessão, ela é recuperada. Se for o primeiro contato, uma nova `ClientSession` é criada e registrada atomicamente via `computeIfAbsent()` — operação que garante que dois pacotes simultâneos do mesmo cliente nunca resultem em duas sessões distintas.
+
+Após identificar a sessão correta, a thread principal **não processa o pacote ela mesma**. Ela apenas despacha o par `(sessão, pacote)` para o pool de threads e retorna imediatamente ao `receive()`, pronta para atender o próximo cliente. Isso garante que nenhum cliente bloqueie os demais durante o processamento.
+
+```
+Thread principal
+│
+├── receive() ← bloqueia até chegar qualquer datagrama
+├── extrai ip:porta → forma clientKey
+├── sessions.computeIfAbsent(clientKey, ...) → obtém ou cria sessão
+├── pool.submit(() -> session.handle(packet)) → despacha para pool
+└── volta ao receive() imediatamente
+```
+
+---
+
+### Camada 2 — Pool de threads: processamento por sessão
+
+O pool é criado com `Executors.newFixedThreadPool(10)`, o que significa que até 10 requisições podem ser processadas em paralelo. Cada tarefa submetida ao pool é uma chamada a `session.handle(packet)`.
+
+O método `handle()` da `ClientSession` é declarado como `synchronized`. Isso garante que, mesmo que o mesmo cliente envie dois pacotes rapidamente (por exemplo, um `GET` seguido de um `NACK`), as duas tarefas serão executadas em sequência dentro da mesma sessão, evitando condições de corrida no estado interno da sessão (como o campo `lastFilename`). Clientes diferentes, porém, possuem sessões distintas e não se bloqueiam mutuamente.
+
+```
+Pool de threads (até 10 paralelas)
+│
+├── Thread 1: sessão A → handleGet()  → lê arquivo → envia chunks para A
+├── Thread 2: sessão B → handleGet()  → lê arquivo → envia chunks para B
+├── Thread 3: sessão C → handleGet()  → lê arquivo → envia chunks para C
+└── Thread 4: sessão A → handleNack() → retransmite segmentos para A  ← aguarda Thread 1 (synchronized)
+```
+
+O socket é **compartilhado** entre todas as sessões e threads. Em UDP, o mesmo socket pode enviar para múltiplos destinos, pois cada `DatagramPacket` carrega o endereço e a porta do destinatário. Como `DatagramSocket.send()` é thread-safe na JVM, não é necessário sincronizar os envios.
+
+---
+
+### Isolamento de estado entre clientes
+
+Cada `ClientSession` encapsula exclusivamente o estado da transferência do seu cliente: o endereço e porta de destino, e o nome do último arquivo solicitado (`lastFilename`), usado para atender retransmissões via `NACK`. Não existe estado compartilhado entre sessões diferentes. Isso resolve um problema presente na versão single-cliente, onde `lastFilename`, `lastAddr` e `lastPort` eram campos do `Server` e seriam sobrescritos por um segundo cliente antes que o primeiro concluísse sua retransmissão.
+
+---
+
 # Etapas da comunicação cliente-servidor
 
 ### Inicialização dos endpoints
 
-O servidor cria um socket associado à porta `9876`, fazendo com que o sistema operacional direcione para ele todos os datagramas destinados a essa porta. O cliente cria um socket com uma porta efêmera atribuída automaticamente pelo SO e resolve o endereço do servidor (`localhost`). Não há estabelecimento de conexão — o modelo é puramente baseado em troca de datagramas, conforme o UDP.
+O servidor cria um socket associado à porta `9876`, fazendo com que o sistema operacional direcione para ele todos os datagramas destinados a essa porta. O cliente cria um socket com uma porta efêmera atribuída automaticamente pelo SO e resolve o endereço do servidor. Não há estabelecimento de conexão — o modelo é puramente baseado em troca de datagramas, conforme o UDP.
 
 ---
 
@@ -60,16 +118,18 @@ Packet[seq=0, flags=FLAG_GET, payload="arquivo.txt"]
 
 ### Processamento no servidor
 
-O servidor permanece bloqueado em `receive()` até a chegada de um datagrama. Ao receber, deserializa os bytes em um objeto `Packet` e verifica o checksum. Se a flag for `FLAG_GET`, extrai o nome do arquivo do payload e inicia o processamento.
+A thread principal recebe o datagrama, identifica o cliente, obtém ou cria a sessão correspondente e despacha para o pool. A thread do pool invoca `session.handle()`, que verifica a flag `FLAG_GET` e chama `handleGet()`.
 
 O servidor então:
 
 1. Verifica se o arquivo existe no sistema de arquivos
 2. Calcula o tamanho total (`fileSize`) e o número de segmentos (`numSegments`)
-3. Envia um pacote `FLAG_START` com os metadados
-4. Inicia o envio sequencial dos segmentos
+3. Calcula o hash MD5 do arquivo completo para verificação de integridade pelo cliente
+4. Envia um pacote `FLAG_START` com os metadados
+5. Inicia o envio sequencial dos segmentos
+6. Armazena o nome do arquivo em `lastFilename` para uso em eventuais retransmissões via NACK
 
-Se o arquivo não existir, responde com um pacote `FLAG_ERROR` contendo a mensagem de erro. Após a transferência inicial bem-sucedida, o servidor armazena o nome do arquivo, o endereço e a porta do cliente para uso em eventuais retransmissões.
+Se o arquivo não existir, responde com um pacote `FLAG_ERROR` contendo a mensagem de erro.
 
 ---
 
@@ -78,10 +138,10 @@ Se o arquivo não existir, responde com um pacote `FLAG_ERROR` contendo a mensag
 O servidor envia um pacote com `FLAG_START` cujo payload contém os metadados da transferência no formato:
 
 ```
-"fileSize|numSegments"
+"fileSize|numSegments|md5"
 ```
 
-Esse pacote informa ao cliente quantos segmentos esperar, permitindo que ele detecte perdas ao final da recepção.
+Esse pacote informa ao cliente quantos segmentos esperar e o hash MD5 do arquivo completo, permitindo que ele detecte perdas e valide a integridade ao final.
 
 ---
 
@@ -112,7 +172,7 @@ O `TreeMap` garante que os segmentos ficam ordenados por sequência independente
 
 ### Simulação de perda
 
-O cliente implementa descarte intencional de segmentos para simular condições reais de rede. Antes de armazenar cada segmento recebido, um valor aleatório entre 0.0 e 1.0 é comparado com a constante `LOSS_RATE` (atualmente `0.2`, ou seja, 20%). Se o valor sorteado for menor que `LOSS_RATE`, o segmento é descartado e logado no console:
+O cliente implementa descarte intencional de segmentos para simular condições reais de rede. Antes de armazenar cada segmento recebido, um valor aleatório entre 0.0 e 1.0 é comparado com a taxa de perda configurada pelo usuário no momento da inicialização. Se o valor sorteado for menor que a taxa, o segmento é descartado e logado no console:
 
 ```
 [Cliente] DESCARTADO seq=3 (simulação de perda)
@@ -144,6 +204,8 @@ Somente após confirmar que todos os segmentos foram recebidos, o cliente itera 
 received_arquivo.txt
 ```
 
+Em seguida, o cliente calcula o MD5 do arquivo salvo e compara com o hash recebido no pacote `FLAG_START`. Se os hashes coincidirem, a integridade do arquivo é confirmada. Caso contrário, um erro de integridade é reportado ao usuário.
+
 ---
 
 # Fluxo de chamadas
@@ -153,23 +215,27 @@ received_arquivo.txt
 ```
 main()
  └── start()
-      └── loop:
+      └── loop (thread principal):
            ├── receivePacket()
            │    └── socket.receive()
-           ├── Packet.deserialize()
-           │    └── verifica checksum
-           ├── handleGet()                        (FLAG_GET)
-           │    ├── File.exists()
-           │    ├── Packet(FLAG_START) → socket.send()
-           │    └── sendFile()
-           │         ├── FileInputStream.read()
-           │         ├── Packet(FLAG_DATA, seq, chunk) → socket.send()
-           │         └── Packet(FLAG_END) → socket.send()
-           └── handleNack()                       (FLAG_NACK)
-                ├── extrai lista de sequências do payload
-                ├── RandomAccessFile.seek(seq * CHUNK_SIZE)
-                ├── Packet(FLAG_DATA, seq, chunk) → socket.send()  (para cada faltante)
-                └── Packet(FLAG_END) → socket.send()
+           ├── extrai ip:porta → clientKey
+           ├── sessions.computeIfAbsent(clientKey) → obtém ou cria ClientSession
+           └── pool.submit(() -> session.handle(packet))
+                │
+                └── (thread do pool) session.handle()       [synchronized]
+                     ├── handleGet()                        (FLAG_GET)
+                     │    ├── File.exists()
+                     │    ├── calculateMD5()
+                     │    ├── Packet(FLAG_START) → socket.send()
+                     │    └── sendFile()
+                     │         ├── FileInputStream.read()
+                     │         ├── Packet(FLAG_DATA, seq, chunk) → socket.send()
+                     │         └── Packet(FLAG_END) → socket.send()
+                     └── handleNack()                       (FLAG_NACK)
+                          ├── extrai lista de sequências do payload
+                          ├── RandomAccessFile.seek(seq * CHUNK_SIZE)
+                          ├── Packet(FLAG_DATA, seq, chunk) → socket.send()  (para cada faltante)
+                          └── Packet(FLAG_END) → socket.send()
 ```
 
 ## Cliente
@@ -193,5 +259,7 @@ main()
                      ├── se missing vazio → break
                      ├── requestRetransmission() → Packet(FLAG_NACK) → sendPacket()
                      └── (repete o ciclo)
-                └── saveFile() → FileOutputStream.write()
+                └── saveFile()
+                     ├── FileOutputStream.write() → grava chunks em ordem do TreeMap
+                     └── calculateMD5() → compara com hash recebido no START
 ```
